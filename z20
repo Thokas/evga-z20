@@ -53,8 +53,9 @@
   z20 presence [--dry-run]              act on the desktop when you leave and come back
                                         (settings: ~/.config/z20/presence.ini; runs until stopped,
                                         as the systemd user service z20-presence)
-  z20 events [--json]                   what the keyboard reports on its own: profile, effect and
-                                        Game Mode changed with its keys, media keys (until Ctrl+C)
+  z20 events [--json] [--wait S]        what the keyboard reports on its own: profile, effect and
+                                        Game Mode changed with its keys, media keys (until Ctrl+C,
+                                        or only the first event within S seconds)
   z20 backup                            copy profiles 1-9 and the macros to ~/.local/state/z20/backups/
   z20 restore DIR [--profile N | --macro N]
                                         write profiles and macros back from a backup (all in DIR,
@@ -722,6 +723,11 @@ def lighting(p):
         state["colors"] = [color_hex(p[start + i * size:start + i * size + 4]) for i in range(count)]
     if effect in EFFECT_CYCLE:
         state["cycle_ms"] = p[EFFECT_CYCLE[effect]] | p[EFFECT_CYCLE[effect] + 1] << 8
+    if effect == 6:
+        state["brightness"] = round(p[P_STARS_BRIGHTNESS] * 100 / 255)
+    elif effect in EFFECT_COLORS:  # the brightness byte of the effect's first color
+        offset, _, size = EFFECT_COLORS[effect]
+        state["brightness"] = round(p[offset + size - 4] * 100 / 255)
     return state
 
 
@@ -1158,27 +1164,34 @@ def keyboard_event(data):
     return {"event": "report", "data": data.hex(" ")}
 
 
-def watch_events(as_json):
+def watch_events(as_json, wait=None):
     """Print what the keyboard reports on interface 1 until Ctrl+C; waits while it is unplugged.
-    Only reads input reports, so it needs no lock and sends nothing."""
+    With wait, only the first event within that many seconds, then it ends (a widget runs it
+    again and again). Only reads input reports, so it needs no lock and sends nothing."""
+    deadline = None if wait is None else time.monotonic() + wait
+    left = lambda: None if deadline is None else deadline - time.monotonic()
     trouble = None
-    while True:
+    while deadline is None or left() > 0:
         try:
             fd = os.open(find_keyboard()[0], os.O_RDONLY)
         except (Z20Error, OSError) as e:
-            if str(e) != trouble:
+            if str(e) != trouble and deadline is None:
                 print(f"waiting for the keyboard: {e}", file=sys.stderr, flush=True)
-                trouble = str(e)
-            time.sleep(2)
+            trouble = str(e)
+            time.sleep(2 if deadline is None else max(0, min(2, left())))
             continue
         trouble = None
         try:
             while True:
+                if deadline is not None and (left() <= 0 or not select.select([fd], [], [], left())[0]):
+                    return
                 data = os.read(fd, 64)
                 event = keyboard_event(data)
                 if event:
                     print(json.dumps(event) if as_json else f"{time.strftime('%H:%M:%S')}  {interface_event(data)}",
                           flush=True)
+                    if deadline is not None:
+                        return
         except OSError:
             pass  # unplugged: wait for it again
         finally:
@@ -1318,6 +1331,7 @@ def main():
     parser.add_argument("--cycle", type=int, metavar="MS", help="effect cycle in milliseconds")
     parser.add_argument("--live", action="store_true", help="light: in RAM only, until z20 light reload")
     parser.add_argument("--dry-run", action="store_true", help="presence: say what it would do instead")
+    parser.add_argument("--wait", type=float, metavar="S", help="events: only the first within S seconds")
     parser.add_argument("--json", action="store_true", help="print as JSON")
     args = parser.parse_intermixed_args()  # options may also stand between the values
     v = args.values
@@ -1372,7 +1386,7 @@ def main():
         if v:
             parser.error(f"{args.command} takes no values")
         try:
-            presence(args.dry_run) if args.command == "presence" else watch_events(args.json)
+            presence(args.dry_run) if args.command == "presence" else watch_events(args.json, args.wait)
         except KeyboardInterrupt:
             pass
         return 0

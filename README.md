@@ -95,8 +95,9 @@ z20 sensor leave dark 30              when you leave, after 30 s: dark, lock, sl
 z20 sensor come wake 1                when you come, after 1 s: wake, unlock, nothing
 z20 sensor welcome thunder 3000       effect when you come (fade, rows, explosion, raining,
                                       barber, lightbar, thunder) and its length in ms
-z20 events [--json]                   what the keyboard reports itself (profile, effect and
-                                      Game Mode changed with its keys, media keys)
+z20 events [--json] [--wait S]        what the keyboard reports itself (profile, effect and
+                                      Game Mode changed with its keys, media keys); with
+                                      --wait only the first event within S seconds
 z20 presence [--dry-run]              lock, pause media, screen off ... when you leave
                                       (a service, see Presence service)
 z20 backup                            profiles 1-9 and macros to ~/.local/state/z20/backups/

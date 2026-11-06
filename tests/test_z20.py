@@ -479,13 +479,14 @@ class Lighting(unittest.TestCase):
         q = z20.set_lighting(p, "static", [b"\x12\x34\x56"], 50, None)
         self.assertEqual(changed(p, q) - {1288, 1289, 1336, 1337, 1338, 1339}, set())
         self.assertEqual((q[1288], bytes(q[1336:1340])), (1, b"\x80\x12\x34\x56"))
-        self.assertEqual(z20.lighting(q), {"effect": "static", "colors": ["#123456"]})
+        self.assertEqual(z20.lighting(q), {"effect": "static", "colors": ["#123456"], "brightness": 50})
 
     def test_breathing_keeps_the_hold_percentages(self):
         p = profile()
         q = z20.set_lighting(p, "breathing", [b"\x00\xff\x00", b"\x00\x00\x00"], None, 4000)
         self.assertEqual(changed(p, q) - {1288, 1289, 1356, 1357, 1360, 1361, 1362, 1365, 1366, 1367}, set())
-        self.assertEqual(z20.lighting(q), {"effect": "breathing", "colors": ["#00ff00", "#000000"], "cycle_ms": 4000})
+        self.assertEqual(z20.lighting(q), {"effect": "breathing", "colors": ["#00ff00", "#000000"], "cycle_ms": 4000,
+                                           "brightness": round(p[z20.P_BREATHING + 19] * 100 / 255)})  # as it was
 
     def test_effects_keep_their_stored_colors(self):
         p = profile()
