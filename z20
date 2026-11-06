@@ -25,9 +25,10 @@
   z20 key ... --fn                      the key's Fn layer
   z20 key ... --profile N               another profile than the active one
   z20 light [--json]                    lighting of the active profile
-  z20 light off | static COLOR | breathing COLOR [COLOR]
+  z20 light off | static [COLOR] | breathing [COLOR [COLOR]]
   z20 light wave | spiral | pulse | stars | reactive | fade | rows
                                         that effect, with the colors the profile keeps for it
+                                        (so do static and breathing without colors)
   z20 light ... --profile N             another profile than the active one
   z20 light ... --brightness P          percent (0-100) for the effect's colors
   z20 light ... --cycle MS              length of one effect cycle (speed)
@@ -1359,10 +1360,10 @@ def main():
     if args.command == "light" and v and v not in (["reload"], ["default"]):
         if v[0] not in EFFECTS:
             parser.error(f"light: one of {', '.join(EFFECTS)}, or reload, default")
-        wanted = {"static": (1, 1), "breathing": (1, 2)}.get(v[0], (0, 0))
-        if not wanted[0] <= len(v) - 1 <= wanted[1]:
-            parser.error(f"light {v[0]}: " + (f"needs {'one or two colors' if v[0] == 'breathing' else 'a color'}"
-                                              if wanted[0] else "takes no colors"))
+        most = {"static": 1, "breathing": 2}.get(v[0], 0)  # without colors: the ones the profile keeps
+        if len(v) - 1 > most:
+            parser.error(f"light {v[0]}: " + (f"at most {most} color{'s' if most > 1 else ''}" if most
+                                              else "takes no colors"))
     if args.command == "key":
         if not v:
             parser.error("key: which key (e1, capslock, f1, a ...), or all")

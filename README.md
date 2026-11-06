@@ -75,7 +75,7 @@ z20 key all default                   every key as from the factory, E1-E5 too (
 z20 key ... --fn | --profile N        the key's Fn layer, another profile
 z20 light [--json]                    lighting of the active profile
 z20 light off
-z20 light static ff8000               one color (rrggbb or #rrggbb)
+z20 light static ff8000               one color (rrggbb or #rrggbb; without: the stored one)
 z20 light breathing 00ff00 [0000ff]   breathe between two colors (or into dark)
 z20 light wave | spiral | pulse | stars | reactive | fade | rows
                                       that effect, with the colors the profile keeps for it
