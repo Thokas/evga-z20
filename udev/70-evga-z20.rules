@@ -1,0 +1,10 @@
+# EVGA Z20 keyboards: let the logged-in user talk to the configuration
+# interface over hidraw (`z20`: lighting, profiles, Game Mode, macros).
+# Only USB interface 1, which carries the configuration reports, the media
+# keys and the macros' mouse clicks: the hidraw nodes of interfaces 0 and 2
+# carry every keystroke.
+# 260a / 260c: Z20 Elite / Z20 RGB, 2610 / 2617: the same with ISO layout.
+# usb_id provides the interface number (60-persistent-hidraw.rules does too,
+# where it exists); uaccess has to be tagged before 73-seat-late.rules, hence 70-.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3842", ATTRS{idProduct}=="260a|260c|2610|2617", IMPORT{builtin}="usb_id"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3842", ATTRS{idProduct}=="260a|260c|2610|2617", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

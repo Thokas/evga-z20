@@ -1,0 +1,205 @@
+# EVGA Z20 configuration protocol
+
+What `z20` knows about how the Z20 is configured over USB. It was worked out
+from EVGA's Windows software, Unleash RGB 1.0.28 (its .NET assemblies, mainly
+`EDispNetLib.dll`), for interoperability, and checked on a Z20 Elite ISO
+(`3842:2610`, firmware 1.38). Where something comes only from the software
+and wasn't tried on the keyboard, it says so.
+
+## Devices
+
+| USB ID      | Model                  | Bootloader ID |
+| ----------- | ---------------------- | ------------- |
+| `3842:260a` | Z20 Elite              | `2609`        |
+| `3842:260c` | Z20 RGB                | `260b`        |
+| `3842:2610` | Z20 Elite ISO ("UK")   | `260f`        |
+| `3842:2617` | Z20 RGB ISO ("UK")     | `2616`        |
+
+Unleash drives all four with the same code. The bootloader IDs belong to a
+keyboard in firmware-update mode; leave those alone.
+
+The keyboard has three USB interfaces:
+
+- **0**: boot keyboard (6 keys at a time).
+- **1**: mouse (report 1, used by mouse-click macros), consumer keys
+  (report 2: media keys, volume wheel), system control (report 0x12), a
+  status input report 3, and the **configuration feature reports** below.
+  Report 3 says when Game Mode changes: `03 03 01` on, `03 03 00` off.
+- **2**: n-key rollover keyboard (report 0x10).
+
+Only interface 1 is needed. The hidraw nodes of interfaces 0 and 2 carry every
+keystroke, so the udev rule in this repository opens interface 1 only.
+
+## Transactions
+
+Every command is a feature report on interface 1: the host sends it
+(SET_FEATURE), waits a few milliseconds, and reads the same report ID back
+(GET_FEATURE, same length). The answer repeats the header with a status in
+byte 6: `C0` success, `C1` failed, `C2` busy. Reading a report without sending
+a request first gives zeros. Unleash waits 5 ms for most report 4 commands,
+10 ms for the firmware version, 20 ms after a profile read, 100 ms after
+writes and 150 ms around macros.
+
+All reports start with the report ID, then `EA 02`.
+
+| Report | Length (with ID) | Use |
+| ------ | ---------------- | --- |
+| 4      | 17   | general commands |
+| 5      | 521  | firmware update: **don't** |
+| 6      | 792  | colors per LED (live) |
+| 7      | 136  | lighting effect (live, RAM) |
+| 8      | 1806 | one profile: name, key functions, lighting |
+| 9      | 1032 | one macro, or the table of used macro slots |
+| 10     | 59   | a macro's name |
+| 11, 12 | 2056, 59 | recorded light effect for the distance sensor: data, name |
+| 15     | 264  | data kept for the software |
+
+## Report 4: general commands
+
+`04 EA 02 <command> <sub 1> <sub 2> <status> <value> ...` (17 bytes). Sub 1 is
+`01` to read and `00` to write. The value (byte 7) is what is written, or
+what the answer carries.
+
+| Command | Read answer / write value | `z20` |
+| ------- | ------------------------- | ----- |
+| `01` firmware version | bytes 7, 8: minor, major (`26 01` = 1.38); sub 1 `00` asks the bootloader's | reads |
+| `06` active profile | 1-9 | reads, writes |
+| `07` key function in RAM | sub 2 = layer (0 normal, 1 Fn), byte 7 = key position, bytes 8-11 = function | (reads) |
+| `08` reload the active profile | write after changing it with report 8 | writes |
+| `0B` Game Mode ("E key mode") | 0 off, 1 on | reads, writes |
+| `0C` keys blocked in Game Mode (RAM) | bit mask, see below | |
+| `0F` 6KRO / NKRO | 0 6KRO, 1 NKRO | reads |
+| `11`, `1B` report rate | 0 4000 Hz, 1 2000, 2 1000, 3 8000 | |
+| `12` save RAM to the profile | profile number, 0 = active | |
+| `22` flash layout | | |
+| `30` Fn key off, `33` key position reports, `34` external flash, `41`-`44` distance sensor | | |
+| `02` reset, `03` **erase firmware**, `04` **enter bootloader**, `09` reset profile, `31` **factory reset** | | never |
+
+Game Mode blocks (bits): 1 Alt+Tab, 2 Tab, 4 Ctrl+Esc, 8 Alt+F4, 0x10 left
+Shift, 0x20 menu key, 0x40 Windows key.
+
+## Report 8: a profile
+
+Request: `08 EA 02 01 <n>` (read profile n, 1-9; 254 is the factory default).
+To change one, read it, change bytes, set byte 3 to `00` (write), recompute
+the checksum and send the whole report; then send `04 EA 02 08 00` (reload) if
+it is the active profile. That is how Unleash assigns keys; `z20` does the
+same for lighting and checks the result by reading the profile back.
+
+| Bytes | Content |
+| ----- | ------- |
+| 7     | checksum |
+| 8-9   | name length, in UTF-16 characters |
+| 10-135 | name, UTF-16LE ("DEFAULT 1") |
+| 136   | keys blocked in Game Mode |
+| 137   | report rate |
+| 152-182 | distance sensor settings |
+| 264-747 | key functions, normal layer: 121 × 4 bytes by key position |
+| 748-1231 | key functions, Fn layer |
+| 1288  | lighting effect |
+| 1289  | effect's direction or sub mode |
+| 1320- | settings of every effect, see below |
+
+### Key functions
+
+4 bytes: function, then three parameters.
+
+| Function | Parameters |
+| -------- | ---------- |
+| `00` key | modifier bits (1 LCtrl, 2 LShift, 4 LAlt, 8 LGUI, 0x10-0x80 the right ones), HID key usage, a second usage |
+| `02` media key | HID consumer usage, little-endian |
+| `03` macro | macro number, run mode, repeat count |
+| `04` Fn, `05` Game Mode key | |
+| `06` wheel | 0 up, 1 down |
+| `07`, `08`, `09` | left, right, middle click |
+| `11`-`19` | profile 1-9; `1E`, `1F` next / previous profile |
+| `FF` | disabled |
+
+Macro run modes: `00` loop, `01` once, `02` multi-stage, `03` repeat, each
+started on key release; `08`-`0B` the same started on key press (`08`:
+pressing again stops the loop, checked); `04` two-phase; `0C` while held.
+
+Key positions: 0 Game Mode key, 1 Esc, 2-13 F1-F12, 14 Print, 15 Scroll Lock,
+16 Pause, 18-20 media previous / play / next, **21 E1**, 22 `` ` ``, 23-32 1-0,
+33 -, 34 =, 35 Backspace, 36 Insert, 37 Home, 38 Page Up, 39 Num Lock, 40-42
+keypad / * -, **43 E2**, 44 Tab, 45-54 Q-P, 55 [, 56 ], 57 \, 58 Delete, 59
+End, 60 Page Down, 61-63 keypad 7-9, 64 keypad +, **65 E3**, 66 Caps Lock,
+67-75 A-L, 76 ;, 77 ', 78 Enter, 79-81 keypad 4-6, **82 E4**, 83 left Shift,
+84-90 Z-M, 91 `,`, 92 ., 93 /, 94 right Shift, 96 Up, 98-100 keypad 1-3, 101
+keypad Enter, **102 E5**, 103 left Ctrl, 104 Windows, 105 left Alt, 106 Space,
+107 right Alt, 108 Fn, 109 Menu, 110 right Ctrl, 111-113 Left / Down / Right,
+114 keypad 0, 115 keypad ., 116-117 volume wheel up / down, 118 mute, 119 ISO
+`#`, 120 ISO `\`. LEDs only: 160-168 left light bar, 176-184 right light bar,
+192-195 logo.
+
+### Lighting
+
+Effect numbers (byte 1288): 0 off, 1 static, 2 breathing, 3 pulse, 4 spiral
+rainbow, 5 rainbow wave, 6 star shining, 7 trigger (reactive), 16 fade in/out,
+17 by row; 18-23 are effects for the distance sensor (explosion, raining,
+hair salon, light bar wave, thunder, recorded).
+
+Each effect keeps its own settings, so switching effects keeps what was set
+before. Every block starts with zone (0x80 all; or bits 1 numpad, 2 F keys,
+4 number keys, 8 arrows, 0x10 WASD, 0x20 light bars), start mode (0 with the
+profile, 1 on a key press) and stop mode (0 never, 1 on press, 2 on release).
+Colors are 4 bytes: brightness, red, green, blue.
+
+| Bytes | Effect | Fields after zone, start, stop |
+| ----- | ------ | ------------------------------ |
+| 1320-1339 | static | 13 reserved, color at 1336 |
+| 1340-1367 | breathing | random, 12 reserved, cycle ms (1356, 2 bytes LE), 2 × (hold %, color) |
+| 1368-1424 | pulse | random, 12 reserved, cycle ms, colors per cycle, on hold %, off hold %, background color, 8 colors |
+| 1425-1475 | spiral | direction (0 clockwise, 1 counter), 12 reserved, cycle ms, colors per cycle, 8 colors |
+| 1476-1526 | wave | random, direction (0 up, 1 down, 2 right, 3 left), 11 reserved, cycle ms, colors per cycle, 8 colors |
+| 1527-1577 | trigger | random, sub mode (0 typed key, 1 one key, 2 3×3 around it), 11 reserved, color shift ms, colors per cycle, 8 colors |
+| 1578-1596 | stars | 13 reserved, cycle ms, brightness |
+| 1597-1616 | fade | random, 1 for the software, 11 reserved, color |
+| 1617-1661 | by row | random, 1 for the software, 11 reserved, colors per cycle, 7 colors |
+
+When an effect is written, Unleash puts its direction (spiral, wave) or sub
+mode (trigger) into byte 1289 as well, and 0 for the others.
+
+Not found yet: where the brightness set with Fn + Up / Down is kept.
+
+Live effects and per-LED colors (reports 7 and 6, then `04 EA 02 12` to keep
+them) are what OpenRGB uses; see its `EVGAKeyboardController`.
+
+## Reports 9 and 10: macros
+
+The keyboard keeps up to 100 macros.
+
+- Used slots: send `09 EA 02 01 00 00 C1`, wait 150 ms, read: bytes 8-107
+  are 1 for each used slot 1-100.
+- One macro: `09 EA 02 01 <n> 00 C1`, wait 150 ms, read 1032 bytes.
+- Only its name: `0A EA 02 01 <n> 00 C1`, wait 10 ms, read 59 bytes.
+
+| Bytes | Content |
+| ----- | ------- |
+| 7     | checksum |
+| 8     | name length |
+| 9-58  | name, UTF-8 |
+| 59-61 | run mode, repeat count, time unit: not used by Unleash 1.0.28, which sets the run mode in the key function |
+| 62-63 | data length |
+| 64-1030 | data |
+| 1031  | 1 in use, `FF` deleted |
+
+Data, one step after another:
+
+| Bytes | Step |
+| ----- | ---- |
+| `01 lo hi` | wait (value + 1) / 2 ms |
+| HID key usage (`04`-`65`), modifiers `70`-`77` (LCtrl, LShift, LAlt, LGUI, RCtrl, RShift, RAlt, RGUI) | key down; with 0x80 added: key up |
+| `7A` / `7B` / `7C` | left / right / middle button down; `FA` / `FB` / `FC` up |
+| `78` / `F8` | wheel down / up |
+| `03 lo hi` | media key down (consumer usage); `03 00 00` up |
+| `80 x x y y` | move the mouse to x, y |
+
+Writing (from Unleash's code, not tried yet): the same report with byte 3
+`00`, byte 6 `C1`, the checksum, status 1; deleting: status `FF` and both
+lengths 0. A macro is put on a key with a key function `03`.
+
+## Checksums
+
+Profiles (report 8) and macros (report 9) carry in byte 7 the negated sum
+of all bytes after it, so all bytes from 7 on add up to 0 (mod 256).

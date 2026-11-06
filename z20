@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""EVGA Z20 keyboards: status, lighting, profiles, Game Mode and macros.
+
+  z20 status [--json]                   profile, Game Mode, lighting, E1-E5, macro names
+  z20 macros [--json]                   stored macros with what they do
+  z20 profile N                         switch to profile 1-9
+  z20 game-mode on | off | toggle
+  z20 light [--json]                    lighting of the active profile
+  z20 light off | static COLOR | breathing COLOR [COLOR]
+  z20 light wave | spiral | pulse | stars | reactive | fade | rows
+                                        that effect, with the colors the profile keeps for it
+  z20 light ... --profile N             another profile than the active one
+  z20 light ... --brightness P          percent (0-100) for the effect's colors
+  z20 light ... --cycle MS              length of one effect cycle (speed)
+  z20 backup                            copy profiles 1-9 and the macros to ~/.local/state/z20/backups/
+  z20 restore DIR [--profile N]         write profiles back from a backup (all in DIR, or N)
+
+COLOR is rrggbb or #rrggbb. Talks to the keyboard's configuration interface
+(USB interface 1) over /dev/hidraw* the way EVGA's Unleash RGB does: a
+command goes out as a feature report, the keyboard answers it in the same
+report, read back right after. A profile (lighting and key assignments) is
+changed by reading it, changing only the bytes that matter and writing it
+back; the profile as it was is saved to ~/.local/state/z20/previous/ first,
+and the written profile is read back and compared. The logged-in user needs
+access to that interface's node: udev/70-evga-z20.rules. See PROTOCOL.md.
+"""
+import argparse
+import fcntl
+import glob
+import json
+import os
+import re
+import sys
+import time
+
+VENDOR = 0x3842
+# As Unleash RGB tells them apart; EVGA's "UK" models have the ISO layout. Not the
+# IDs one lower (2609, 260b, 260f, 2616): those are the keyboards in their bootloader.
+PRODUCTS = {0x260A: "Z20 Elite", 0x260C: "Z20 RGB", 0x2610: "Z20 Elite ISO", 0x2617: "Z20 RGB ISO"}
+STATE = os.path.expanduser("~/.local/state/z20")
+
+# Feature report ID -> length including the ID byte (from the report descriptor).
+SIZES = {4: 17, 8: 1806, 9: 1032, 10: 59}
+HEADER = b"\xea\x02"
+READ, WRITE = 1, 0
+SUCCESS = 0xC0
+FAIL = 0xC1
+
+# Report 4 commands this tool sends, and the ones it may send with WRITE. The
+# firmware also knows reset (02), erase firmware (03), bootloader (04), reset
+# profile (09) and factory reset (31): those never go out.
+GENERAL = {0x01: "firmware version", 0x06: "profile", 0x07: "key function", 0x08: "reload profile",
+           0x0B: "Game Mode", 0x0F: "6KRO/NKRO"}
+GENERAL_WRITES = {0x06, 0x08, 0x0B}
+
+# Report 8, one profile: offsets into the report (byte 0 is the report ID).
+P_NAME_LEN, P_NAME = 8, 10  # length in UTF-16 characters, then the name
+P_KEYS, P_FN_KEYS = 264, 748  # 121 key functions of 4 bytes, by key position
+P_EFFECT = 1288
+P_STATIC = 1320  # each effect: zone, start mode, stop mode, ..., then its own fields
+P_BREATHING = 1340
+P_PULSE = 1368
+P_SPIRAL = 1425
+P_WAVE = 1476
+P_TRIGGER = 1527
+P_STARS = 1578
+P_FADE = 1597
+P_ROWS = 1617
+
+EFFECTS = {"off": 0, "static": 1, "breathing": 2, "pulse": 3, "spiral": 4, "wave": 5, "stars": 6,
+           "reactive": 7, "fade": 16, "rows": 17}
+EFFECT_NAMES = {**{v: k for k, v in EFFECTS.items()}, 18: "explosion", 19: "raining", 20: "hair salon",
+                21: "light bar wave", 22: "thunder", 23: "recorded"}
+# Per effect: the byte after the main effect (Unleash writes the effect's direction or
+# sub mode there), its cycle time, and its colors (offset, count, bytes per color;
+# brightness is the first byte of a color, after the hold percentage of breathing's).
+EFFECT_SUB = {4: P_SPIRAL + 3, 5: P_WAVE + 4, 7: P_TRIGGER + 4}
+EFFECT_CYCLE = {2: P_BREATHING + 16, 3: P_PULSE + 16, 4: P_SPIRAL + 16, 5: P_WAVE + 16,
+                6: P_STARS + 16, 7: P_TRIGGER + 16}
+EFFECT_COLORS = {1: (P_STATIC + 16, 1, 4), 2: (P_BREATHING + 18, 2, 5), 3: (P_PULSE + 25, 8, 4),
+                 4: (P_SPIRAL + 19, 8, 4), 5: (P_WAVE + 19, 8, 4), 7: (P_TRIGGER + 19, 8, 4),
+                 16: (P_FADE + 16, 1, 4), 17: (P_ROWS + 17, 7, 4)}
+P_STARS_BRIGHTNESS = P_STARS + 18
+
+E_KEYS = {"E1": 21, "E2": 43, "E3": 65, "E4": 82, "E5": 102}  # key positions
+
+HID_KEYS = {**{4 + i: chr(ord("A") + i) for i in range(26)},
+            **{30 + i: str((i + 1) % 10) for i in range(10)},
+            40: "Enter", 41: "Esc", 42: "Backspace", 43: "Tab", 44: "Space", 45: "-", 46: "=",
+            47: "[", 48: "]", 49: "\\", 50: "#", 51: ";", 52: "'", 53: "`", 54: ",", 55: ".",
+            56: "/", 57: "CapsLock", **{58 + i: f"F{i + 1}" for i in range(12)}, 70: "PrintScreen",
+            71: "ScrollLock", 72: "Pause", 73: "Insert", 74: "Home", 75: "PageUp", 76: "Delete",
+            77: "End", 78: "PageDown", 79: "Right", 80: "Left", 81: "Down", 82: "Up", 83: "NumLock",
+            84: "KP/", 85: "KP*", 86: "KP-", 87: "KP+", 88: "KPEnter",
+            **{89 + i: f"KP{i + 1}" for i in range(9)}, 98: "KP0", 99: "KP.", 100: "ISO\\", 101: "Menu"}
+MODIFIERS = ["LCtrl", "LShift", "LAlt", "LGUI", "RCtrl", "RShift", "RAlt", "RGUI"]
+CONSUMER = {0xE9: "VolumeUp", 0xEA: "VolumeDown", 0xE2: "Mute", 0xCD: "PlayPause",
+            0xB5: "NextTrack", 0xB6: "PrevTrack", 0xB7: "Stop"}
+# EVGA's names: loop / once / multi-stage / repeat, started on key release or key press.
+# 8 is checked: a press starts the loop, the next press stops it.
+RUN_MODES = {0: "loop, on release", 1: "once, on release", 2: "multi-stage, on release",
+             3: "repeat, on release", 4: "two-phase", 8: "loop until pressed again", 9: "once",
+             10: "multi-stage", 11: "repeat", 12: "while held"}
+FUNCTIONS = {4: "Fn", 5: "Game Mode", 7: "left click", 8: "right click", 9: "middle click",
+             11: "info report", **{17 + i: f"profile {i + 1}" for i in range(9)},
+             30: "next profile", 31: "previous profile", 255: "disabled"}
+
+
+class Z20Error(Exception):
+    pass
+
+
+def find_keyboard():
+    """hidraw node of the keyboard's configuration interface (USB interface 1), and the model."""
+    for sysdir in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            with open(os.path.join(sysdir, "device/uevent")) as f:
+                props = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
+            with open(os.path.join(os.path.realpath(os.path.join(sysdir, "device")), "../bInterfaceNumber")) as f:
+                interface = int(f.read(), 16)
+            _bus, vendor, product = (int(x, 16) for x in props.get("HID_ID", "").split(":"))
+        except (OSError, ValueError):
+            continue
+        if vendor == VENDOR and product in PRODUCTS and interface == 1:
+            return "/dev/" + os.path.basename(sysdir), PRODUCTS[product]
+    raise Z20Error("no EVGA Z20 connected")
+
+
+def ioc(nr, size):
+    return (3 << 30) | (size << 16) | (ord("H") << 8) | nr  # _IOC(_IOC_READ|_IOC_WRITE, 'H', nr, size)
+
+
+def checksum(report):
+    """Profiles and macros carry the negated sum of everything after the checksum byte."""
+    return -sum(report[8:]) & 0xFF
+
+
+def check_request(r):
+    """Refuse anything but the commands this tool knows to be safe."""
+    rid = r[0]
+    ok = rid in SIZES and r[1:3] == HEADER
+    if rid == 4:
+        ok = ok and r[3] in GENERAL and (r[4] == READ or r[3] in GENERAL_WRITES)
+    elif rid == 8:
+        ok = ok and (r[3] == READ or (r[3] == WRITE and 1 <= r[4] <= 9 and r[7] == checksum(r)))
+    else:
+        ok = ok and r[3] == READ  # macros: reading only, so far
+    if not ok:
+        raise Z20Error(f"refusing to send {bytes(r[:8]).hex(' ')}")
+
+
+class Keyboard:
+    def __init__(self):
+        path, self.model = find_keyboard()
+        try:
+            self.fd = os.open(path, os.O_RDWR)
+        except PermissionError:
+            raise Z20Error(f"no access to {path}: install udev/70-evga-z20.rules") from None
+
+    def close(self):
+        os.close(self.fd)
+
+    def call(self, request, wait):
+        """Send a feature report, wait for the keyboard and return its answer in that report."""
+        report = bytearray(request).ljust(SIZES[request[0]], b"\0")
+        check_request(report)
+        # A mutable buffer: an immutable one is copied into 1024 bytes, too few for reports 8 and 9.
+        fcntl.ioctl(self.fd, ioc(0x06, len(report)), report, True)  # HIDIOCSFEATURE
+        time.sleep(wait)
+        answer = bytearray(len(report))
+        answer[0] = report[0]
+        fcntl.ioctl(self.fd, ioc(0x07, len(answer)), answer, True)  # HIDIOCGFEATURE
+        if answer[1:3] != HEADER or answer[6] != SUCCESS:
+            raise Z20Error(f"the keyboard refused {bytes(report[:8]).hex(' ')}: {bytes(answer[:8]).hex(' ')}")
+        return bytes(answer)
+
+    def general(self, command, sub=READ, value=0, wait=0.005):
+        return self.call(bytes([4, *HEADER, command, sub, 0, 0, value]), wait)
+
+    def firmware(self):
+        a = self.general(0x01, wait=0.01)
+        return f"{a[8]}.{a[7]:02}"  # 26 01 is 1.38
+
+    def profile_number(self):
+        return self.general(0x06)[7]
+
+    def set_profile(self, n):
+        self.general(0x06, WRITE, n, wait=0.1)
+
+    def game_mode(self):
+        return bool(self.general(0x0B)[7])
+
+    def set_game_mode(self, on):
+        self.general(0x0B, WRITE, int(on), wait=0.1)
+
+    def nkro(self):
+        return bool(self.general(0x0F)[7])
+
+    def read_profile(self, n):
+        p = self.call(bytes([8, *HEADER, READ, n]), 0.02)
+        if p[4] != n or p[7] != checksum(p):
+            raise Z20Error(f"profile {n} came back damaged")
+        return p
+
+    def write_profile(self, n, profile):
+        """Write a profile (as read, with changes), check it by reading it back and make
+        the keyboard use it if it is the active one. The old one goes to previous/ first."""
+        if len(profile) != SIZES[8] or profile[1:3] != HEADER:
+            raise Z20Error(f"not a profile: {bytes(profile[:8]).hex(' ')}")
+        old = self.read_profile(n)
+        save(os.path.join(STATE, "previous"), {f"profile-{n}": old})
+        report = bytearray(profile)
+        report[3], report[4] = WRITE, n
+        report[7] = checksum(report)
+        if report[8:] == old[8:]:
+            return
+        self.call(report, 0.1)
+        if self.read_profile(n)[8:] != report[8:]:
+            raise Z20Error(f"profile {n} reads back different from what was written; "
+                           f"the old one is in {STATE}/previous (z20 restore {STATE}/previous)")
+        if n == self.profile_number():
+            self.general(0x08, WRITE, wait=0.1)  # reload: as Unleash does after writing a profile
+
+    def macro_slots(self):
+        table = self.call(bytes([9, *HEADER, READ, 0, 0, FAIL]), 0.15)
+        return [i for i in range(1, 101) if table[7 + i] == 1]
+
+    def macro_name(self, n):
+        a = self.call(bytes([10, *HEADER, READ, n, 0, FAIL]), 0.01)
+        return a[9:9 + min(a[8], 50)].decode("utf-8", "replace")
+
+    def read_macro(self, n):
+        return self.call(bytes([9, *HEADER, READ, n, 0, FAIL]), 0.15)
+
+
+def save(directory, reports):
+    os.makedirs(directory, exist_ok=True)
+    for name, data in reports.items():
+        with open(os.path.join(directory, f"{name}.bin"), "wb") as f:
+            f.write(data)
+
+
+def key_name(code):
+    return MODIFIERS[code - 0x70] if 0x70 <= code <= 0x77 else HID_KEYS.get(code, f"key 0x{code:02x}")
+
+
+def key_function(b, macro_names):
+    """Text and JSON for a key's 4-byte function (function, parameter 1-3)."""
+    func, p1, p2, p3 = b
+    if func == 0:
+        keys = [MODIFIERS[i] for i in range(8) if p1 & (1 << i)] + [HID_KEYS.get(k, f"0x{k:02x}") for k in (p2, p3) if k]
+        return "key " + "+".join(keys or ["none"]), {"function": "key", "keys": keys}
+    if func == 2:
+        usage = p1 | p2 << 8
+        return f"media {CONSUMER.get(usage, f'0x{usage:03x}')}", {"function": "media", "usage": usage}
+    if func == 3:
+        name = macro_names.get(p1, "")
+        text = f"macro {p1}" + (f' "{name}"' if name else "") + (f" ({RUN_MODES.get(p2, p2)})" if p2 else "")
+        return text, {"function": "macro", "macro": p1, "name": name, "run": RUN_MODES.get(p2, p2)}
+    if func == 6:
+        text = "wheel " + ("up" if p1 == 0 else "down")
+        return text, {"function": "wheel", "text": text}
+    text = FUNCTIONS.get(func, f"function {func} ({p1} {p2} {p3})")
+    return text, {"function": text}
+
+
+def macro_actions(data):
+    """The steps of a macro's data: waits, keys and mouse buttons down / up, and so on."""
+    out, i = [], 0
+    data = bytes(data) + b"\0" * 4  # a cut-off last step decodes as zeros instead of failing
+    while i < len(data) - 4:
+        b = data[i]
+        if b == 0x01:
+            out.append(f"wait {((data[i + 1] | data[i + 2] << 8) + 1) / 2:g} ms")  # half milliseconds - 1
+            i += 3
+        elif b == 0x03:
+            usage = data[i + 1] | data[i + 2] << 8
+            out.append(f"{CONSUMER.get(usage, f'media 0x{usage:03x}')} down" if usage else "media up")
+            i += 3
+        elif b == 0x80:
+            out.append(f"mouse to {data[i + 1] | data[i + 2] << 8},{data[i + 3] | data[i + 4] << 8}")
+            i += 5
+        elif b & 0x7F == 0x78:
+            out.append("wheel " + ("up" if b & 0x80 else "down"))
+            i += 1
+        else:  # a key or mouse button, 0x80 set when it goes up
+            button = {0x7A: "left button", 0x7B: "right button", 0x7C: "middle button"}.get(b & 0x7F)
+            out.append(f"{button or key_name(b & 0x7F)} {'up' if b & 0x80 else 'down'}")
+            i += 1
+    return out
+
+
+def color_hex(argb):
+    return "#" + bytes(argb[1:4]).hex()
+
+
+def lighting(p):
+    effect = p[P_EFFECT]
+    state = {"effect": EFFECT_NAMES.get(effect, f"effect {effect}")}
+    if effect in (1, 2, 16):  # one or two colors worth showing; the others have 7-8 each
+        offset, count, size = EFFECT_COLORS[effect]
+        start = offset + size - 4
+        state["colors"] = [color_hex(p[start + i * size:start + i * size + 4]) for i in range(count)]
+    if effect in EFFECT_CYCLE:
+        state["cycle_ms"] = p[EFFECT_CYCLE[effect]] | p[EFFECT_CYCLE[effect] + 1] << 8
+    return state
+
+
+def lighting_text(state):
+    return " ".join([state["effect"], *state.get("colors", []),
+                     *([f"{state['cycle_ms']} ms"] if "cycle_ms" in state else [])])
+
+
+def parse_color(text):
+    if not re.fullmatch(r"#?[0-9a-fA-F]{6}", text):
+        raise Z20Error(f"not a color: {text} (rrggbb or #rrggbb)")
+    return bytes.fromhex(text.lstrip("#"))
+
+
+def set_lighting(p, effect, colors, brightness, cycle):
+    """The profile with another effect (and colors, brightness, cycle); everything else as it was."""
+    p = bytearray(p)
+    p[P_EFFECT] = EFFECTS[effect]
+    mode = EFFECTS[effect]
+    p[P_EFFECT + 1] = p[EFFECT_SUB[mode]] if mode in EFFECT_SUB else 0
+    if mode in EFFECT_COLORS:
+        offset, count, size = EFFECT_COLORS[mode]
+        for i in range(count):
+            c = offset + i * size + size - 4  # brightness, red, green, blue
+            if i < len(colors):
+                p[c + 1:c + 4] = colors[i]
+            if brightness is not None:
+                p[c] = round(brightness * 255 / 100)
+    if mode == 6 and brightness is not None:
+        p[P_STARS_BRIGHTNESS] = round(brightness * 255 / 100)
+    if cycle is not None and mode in EFFECT_CYCLE:
+        p[EFFECT_CYCLE[mode]:EFFECT_CYCLE[mode] + 2] = max(100, min(60000, cycle)).to_bytes(2, "little")
+    return p
+
+
+def profile_name(p):
+    length = p[P_NAME_LEN] | p[P_NAME_LEN + 1] << 8
+    return p[P_NAME:P_NAME + min(2 * length, 126)].decode("utf-16-le", "replace")
+
+
+def status(kb):
+    n = kb.profile_number()
+    p = kb.read_profile(n)
+    names = {m: kb.macro_name(m) for m in kb.macro_slots()}
+    keys = {}
+    for label, pos in E_KEYS.items():
+        for layer, base in ((label, P_KEYS), (f"Fn+{label}", P_FN_KEYS)):
+            b = p[base + pos * 4:base + pos * 4 + 4]
+            if layer == label or b[0] != 0xFF:  # the Fn layer only where it does something
+                text, info = key_function(b, names)
+                keys[layer] = {"text": text, **info}
+    return {"model": kb.model, "firmware": kb.firmware(), "profile": n, "profile_name": profile_name(p),
+            "game_mode": kb.game_mode(), "nkro": kb.nkro(), "lighting": lighting(p),
+            "keys": keys, "macros": {str(m): name for m, name in names.items()}}
+
+
+def macros(kb):
+    out = {}
+    for n in kb.macro_slots():
+        m = kb.read_macro(n)
+        length = min(m[62] | m[63] << 8, 967)
+        # Bytes 59-61 (run mode, repeat count, time unit) stay unused: the run mode that counts
+        # is the one in the key assignment, as Unleash writes it.
+        out[str(n)] = {"name": m[9:9 + min(m[8], 50)].decode("utf-8", "replace"),
+                       "actions": macro_actions(m[64:64 + length])}
+    return out
+
+
+def backup(kb):
+    directory = os.path.join(STATE, "backups", time.strftime("%Y%m%d-%H%M%S"))
+    reports = {f"profile-{n}": kb.read_profile(n) for n in range(1, 10)}
+    reports["macro-table"] = kb.call(bytes([9, *HEADER, READ, 0, 0, FAIL]), 0.15)
+    reports.update({f"macro-{n:03}": kb.read_macro(n) for n in kb.macro_slots()})
+    save(directory, reports)
+    return directory
+
+
+def restore(kb, directory, only):
+    done = []
+    for n in [only] if only else range(1, 10):
+        path = os.path.join(directory, f"profile-{n}.bin")
+        if not os.path.exists(path):
+            if only:
+                raise Z20Error(f"no profile {n} in {directory}")
+            continue
+        with open(path, "rb") as f:
+            p = f.read()
+        if len(p) != SIZES[8] or p[4] != n or p[7] != checksum(p):
+            raise Z20Error(f"{path} is not a good copy of profile {n}")
+        kb.write_profile(n, p)
+        done.append(n)
+    if not done:
+        raise Z20Error(f"no profiles in {directory}")
+    return done
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("command", choices=("status", "macros", "profile", "game-mode", "light", "backup", "restore"))
+    parser.add_argument("values", nargs="*", help="see above")
+    parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
+    parser.add_argument("--brightness", type=int, choices=range(0, 101), metavar="P", help="percent")
+    parser.add_argument("--cycle", type=int, metavar="MS", help="effect cycle in milliseconds")
+    parser.add_argument("--json", action="store_true", help="print as JSON")
+    args = parser.parse_args()
+    v = args.values
+    if args.command == "profile" and (len(v) != 1 or not re.fullmatch(r"[1-9]", v[0])):
+        parser.error("profile needs a number 1-9")
+    if args.command == "game-mode" and (len(v) != 1 or v[0] not in ("on", "off", "toggle")):
+        parser.error("game-mode needs on, off or toggle")
+    if args.command == "light" and v:
+        if v[0] not in EFFECTS:
+            parser.error(f"light: one of {', '.join(EFFECTS)}")
+        wanted = {"static": (1, 1), "breathing": (1, 2)}.get(v[0], (0, 0))
+        if not wanted[0] <= len(v) - 1 <= wanted[1]:
+            parser.error(f"light {v[0]}: " + (f"needs {'one or two colors' if v[0] == 'breathing' else 'a color'}"
+                                              if wanted[0] else "takes no colors"))
+    if args.command == "restore" and len(v) != 1:
+        parser.error("restore needs a backup directory")
+
+    kb = Keyboard()
+    try:
+        if args.command == "status":
+            s = status(kb)
+            if args.json:
+                print(json.dumps(s))
+            else:
+                print(f"EVGA {s['model']}, firmware {s['firmware']}: profile {s['profile']} \"{s['profile_name']}\", "
+                      f"Game Mode {'on' if s['game_mode'] else 'off'}, {'NKRO' if s['nkro'] else '6KRO'}")
+                print(f"lighting: {lighting_text(s['lighting'])}")
+                for label, key in s["keys"].items():
+                    print(f"{label:7} {key['text']}")
+                unused = [f"{m} \"{name}\"" for m, name in s["macros"].items()
+                          if not any(k.get("macro") == int(m) for k in s["keys"].values())]
+                if unused:
+                    print(f"macros on no E key: {', '.join(unused)}")
+        elif args.command == "macros":
+            ms = macros(kb)
+            if args.json:
+                print(json.dumps(ms))
+            for n, m in ([] if args.json else ms.items()):
+                print(f"{n:>3} \"{m['name']}\"")
+                print("      " + ", ".join(m["actions"]))
+        elif args.command == "profile":
+            kb.set_profile(int(v[0]))
+        elif args.command == "game-mode":
+            kb.set_game_mode(not kb.game_mode() if v[0] == "toggle" else v[0] == "on")
+            if args.json or sys.stdout.isatty():
+                on = kb.game_mode()
+                print(json.dumps({"game_mode": on}) if args.json else f"Game Mode {'on' if on else 'off'}")
+        elif args.command == "light":
+            n = args.profile or kb.profile_number()
+            p = kb.read_profile(n)
+            if v:
+                colors = [parse_color(c) for c in v[1:]]
+                if v[0] == "breathing" and len(colors) == 1:
+                    colors.append(b"\0\0\0")  # breathe out to dark
+                p = set_lighting(p, v[0], colors, args.brightness, args.cycle)
+                kb.write_profile(n, p)
+            state = {"profile": n, **lighting(p)}
+            if args.json:
+                print(json.dumps(state))
+            elif not v or sys.stdout.isatty():
+                print(f"profile {n}: {lighting_text(state)}")
+        elif args.command == "backup":
+            print(backup(kb))
+        elif args.command == "restore":
+            done = restore(kb, os.path.expanduser(v[0]), args.profile)
+            print(f"restored profile{'s' if len(done) > 1 else ''} {', '.join(map(str, done))}")
+    finally:
+        kb.close()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Z20Error as e:
+        sys.exit(f"z20: {e}")
