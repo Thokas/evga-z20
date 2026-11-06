@@ -195,7 +195,12 @@ leave run = notify-send "z20" "see you"
 `lock` is `loginctl lock-session`; `screen-off` and `wake` use KDE's
 `kscreen-doctor` and the screen saver's `SimulateUserActivity`;
 `pause-media` pauses the media players that are playing (MPRIS) and
-`resume-media` starts only those again. Coming back drops what leaving
+`resume-media` starts only those again. Careful with `screen-off` on
+screens behind a dock: in standby they can drop off the DisplayPort bus and
+come back under new names, and KDE may then arrange them differently (seen
+with an Intel laptop and a dock; KDE's own screen-off does the same). Turning
+off "deep sleep" / "auto standby" in the screens' menus usually keeps them
+connected. Coming back drops what leaving
 still had waiting (no screen-off after you sat down again), and the other
 way round. Without a config file: leave =
 `pause-media`, come = `wake, resume-media`. It reads the distance twice a
