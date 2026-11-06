@@ -1944,7 +1944,7 @@ def main():
                 steps = macro_actions(data)
                 print(json.dumps({"macro": n, "name": name, "actions": steps}) if args.json
                       else f"macro {n} \"{name}\": {', '.join(steps)}")
-        elif args.command == "profile" and v[0] in ("rename", "copy"):
+        elif args.command == "profile" and v[:1] in (["rename"], ["copy"]):
             n = int(v[1]) if v[0] == "rename" else int(v[2])
             if v[0] == "rename":
                 p = set_profile_name(kb.read_profile(n), v[2])

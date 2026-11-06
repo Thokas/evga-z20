@@ -590,5 +590,46 @@ class Animate(unittest.TestCase):
                 z20.ANIMATION_STATE = old
 
 
+
+class Commands(unittest.TestCase):
+    """main() with a stand-in keyboard: what the commands print."""
+
+    def run_z20(self, *argv):
+        import contextlib
+        import io
+
+        class StandIn:
+            model = "Z20 Elite ISO"
+
+            def __init__(self, lock=True):
+                pass
+
+            def profile_number(self):
+                return 2
+
+            def read_profile(self, n):
+                return z20.set_profile_name(profile(n), "Work" if n == 1 else f"DEFAULT {n}")
+
+            def close(self):
+                pass
+
+        old = z20.Keyboard, sys.argv
+        z20.Keyboard, sys.argv = StandIn, ["z20", *argv]
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                z20.main()
+        finally:
+            z20.Keyboard, sys.argv = old
+        return out.getvalue()
+
+    def test_profile_without_a_number_lists_them(self):
+        import json
+        listed = json.loads(self.run_z20("profile", "--json"))
+        self.assertEqual([p["profile"] for p in listed], list(range(1, 10)))
+        self.assertEqual((listed[0]["name"], listed[1]["name"], listed[1]["active"]), ("Work", "DEFAULT 2", True))
+        self.assertIn("* 2  DEFAULT 2", self.run_z20("profile"))
+
+
 if __name__ == "__main__":
     unittest.main()
