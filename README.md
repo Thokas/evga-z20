@@ -24,7 +24,16 @@ Before every change it saves what it replaces, and after the write it reads
 it back to check it. It never sends firmware, reset or factory-reset
 commands. [PROTOCOL.md](PROTOCOL.md) documents the configuration protocol,
 which was worked out from Unleash RGB for interoperability. Tested on a Z20
-Elite ISO (firmware 1.38). Per-key colors are not done yet.
+Elite ISO (firmware 1.38).
+
+> [!WARNING]
+> **Written entirely by AI.** This project is "vibe-coded": the code, the
+> tests, the protocol notes and this README were written by an AI assistant
+> (Claude, in Claude Code) from a person's prompts, and checked by trying
+> them on one keyboard, not by a person reading every line. The protocol was
+> worked out the same way. It works on the keyboard it was tried on; read
+> the code before you trust it with yours, keep `z20 backup` copies, and use
+> it at your own risk.
 
 ## Keyboards
 
@@ -232,3 +241,9 @@ rm -r ~/.local/state/z20         # the backups too
 Not made or endorsed by EVGA. The protocol was worked out from EVGA's
 Unleash RGB 1.0.28 for interoperability; this repository contains none of
 EVGA's code or files.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The code and documentation were written by AI
+(see the note at the top); the facts about the protocol in PROTOCOL.md are
+free for anyone to use.
