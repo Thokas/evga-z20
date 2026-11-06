@@ -290,8 +290,10 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 
 - What the presence sensor's sleep, wake and unlock actions send, and its 4
   gesture slots.
-- The brightness set with Fn + Up / Down: where the keyboard keeps it isn't
-  known yet.
+- The brightness set with Fn + Up / Down: it changes nothing `z20` can read
+  (the profile, the lighting in RAM, the general settings) and isn't
+  reported, so `z20` can't show or set it. `--brightness` sets the
+  brightness of the effect's colors instead.
 
 ## Uninstall
 

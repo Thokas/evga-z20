@@ -168,7 +168,13 @@ sensor. Unleash polls it for its live display.
 The status report on interface 1 (report 3) tells what changed on the
 keyboard itself: `03 <what> <value>`, what = 0 profile, 1 lighting effect,
 2 6KRO / NKRO, 3 Game Mode (`03 03 01` on), 4 reset to default, 6 key
-position.
+position. Checked: Fn + 2 and Fn + 1 send `03 00 02` and `03 00 01` (the
+profile number as is), the Game Mode key `03 03 01` and `03 03 00`. Media
+keys and the volume wheel come as report 2 (consumer usage, then `00 00`).
+
+Not found: the brightness set with Fn + Up / Down. Two steps down changed no
+byte of the profile, of the lighting blocks in RAM or of the general
+settings readable with report 4, and sent no status report.
 
 ### Key functions
 
