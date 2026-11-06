@@ -43,6 +43,9 @@
   z20 sensor welcome fade|rows|explosion|raining|barber|lightbar|thunder [MS]
                                         the effect when someone comes, and its length
   z20 sensor ... --profile N            another profile than the active one
+  z20 presence [--dry-run]              act on the desktop when you leave and come back
+                                        (settings: ~/.config/z20/presence.ini; runs until stopped,
+                                        as the systemd user service z20-presence)
   z20 backup                            copy profiles 1-9 and the macros to ~/.local/state/z20/backups/
   z20 restore DIR [--profile N | --macro N]
                                         write profiles and macros back from a backup (all in DIR,
@@ -58,12 +61,15 @@ and the written profile is read back and compared. The logged-in user needs
 access to that interface's node: udev/70-evga-z20.rules. See PROTOCOL.md.
 """
 import argparse
+import configparser
 import fcntl
 import glob
 import json
 import os
 import re
 import select
+import shlex
+import subprocess
 import sys
 import time
 
@@ -815,6 +821,159 @@ def watch_sensor(as_json):
         os.close(events)
 
 
+PRESENCE_CONFIG = os.path.expanduser("~/.config/z20/presence.ini")
+PRESENCE_ACTIONS = ("lock", "screen-off", "wake", "pause-media", "resume-media")
+PRESENCE_DEFAULTS = {"leave after": "30", "come after": "1", "leave": "pause-media", "come": "wake, resume-media",
+                     "leave run": "", "come run": "", "distance": ""}
+
+
+def presence_config(path=PRESENCE_CONFIG):
+    """The [presence] section of the config file, with defaults for what it leaves out."""
+    parser = configparser.ConfigParser(defaults=PRESENCE_DEFAULTS, interpolation=None)
+    parser.read_dict({"presence": {}})
+    try:
+        parser.read(path)
+    except configparser.Error as e:
+        raise Z20Error(f"{path}: {e}") from None
+    section = parser["presence"]
+    cfg = {}
+    try:
+        cfg["leave_after"] = float(section["leave after"])
+        cfg["come_after"] = float(section["come after"])
+        cfg["distance_mm"] = round(float(section["distance"]) * 10) if section["distance"] else None
+    except ValueError as e:
+        raise Z20Error(f"{path}: {e}") from None
+    for event in ("leave", "come"):
+        cfg[event] = [a.strip() for a in section[event].split(",") if a.strip()]
+        unknown = [a for a in cfg[event] if a not in PRESENCE_ACTIONS]
+        if unknown:
+            raise Z20Error(f"{path}: {event}: unknown action {', '.join(unknown)} (known: {', '.join(PRESENCE_ACTIONS)})")
+        cfg[f"{event}_run"] = section[f"{event} run"]
+    return cfg
+
+
+class Presence:
+    """Decides from the distance readings when someone left (away for leave_after seconds)
+    and came back (near again for come_after seconds). Starts as present."""
+
+    def __init__(self, leave_after, come_after):
+        self.leave_after, self.come_after = leave_after, come_after
+        self.present, self.since = True, None  # since: when the readings began to disagree
+
+    def update(self, near, now):
+        """near: someone within the distance. Returns "leave", "come" or None."""
+        if near == self.present:
+            self.since = None
+            return None
+        if self.since is None:
+            self.since = now
+        if now - self.since >= (self.leave_after if self.present else self.come_after):
+            self.present, self.since = near, None
+            return "come" if near else "leave"
+        return None
+
+
+class Desktop:
+    """What z20 presence does on the desktop, with standard tools: loginctl (systemd), busctl
+    (D-Bus: media players over MPRIS, the screen saver) and kscreen-doctor (KDE)."""
+
+    MPRIS = ("/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player")
+
+    def __init__(self, dry_run=False):
+        self.dry_run, self.paused = dry_run, []
+
+    def log(self, text):
+        print(f"{time.strftime('%H:%M:%S')}  {text}", flush=True)
+
+    def query(self, *args):
+        try:
+            return subprocess.run(["busctl", "--user", *args], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+
+    def act(self, argv):
+        if self.dry_run:
+            self.log("would run: " + " ".join(shlex.quote(a) for a in argv))
+            return
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+            if done.returncode:
+                self.log(f"{argv[0]} failed: {(done.stderr or done.stdout).strip()[:200]}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            self.log(f"{argv[0]}: {e}")
+
+    def players(self):
+        names = shlex.split(self.query("call", "org.freedesktop.DBus", "/", "org.freedesktop.DBus", "ListNames"))
+        return [n for n in names[2:] if n.startswith("org.mpris.MediaPlayer2.")]
+
+    def playing(self, player):
+        return shlex.split(self.query("get-property", player, *self.MPRIS, "PlaybackStatus"))[1:] == ["Playing"]
+
+    def do(self, action):
+        if action == "lock":
+            self.act(["loginctl", "lock-session"])
+        elif action == "screen-off":
+            self.act(["kscreen-doctor", "--dpms", "off"])
+        elif action == "wake":
+            self.act(["busctl", "--user", "call", "org.freedesktop.ScreenSaver", "/ScreenSaver",
+                      "org.freedesktop.ScreenSaver", "SimulateUserActivity"])
+            self.act(["kscreen-doctor", "--dpms", "on"])
+        elif action == "pause-media":  # and remember who played, for resume-media
+            self.paused = [p for p in self.players() if self.playing(p)]
+            for player in self.paused:
+                self.act(["busctl", "--user", "call", player, *self.MPRIS, "Pause"])
+        elif action == "resume-media":  # only what pause-media paused, if it is still there
+            for player in set(self.paused) & set(self.players()):
+                self.act(["busctl", "--user", "call", player, *self.MPRIS, "Play"])
+            self.paused = []
+
+    def run(self, command):
+        self.act(["sh", "-c", command])
+
+
+def presence(dry_run):
+    """Watch the sensor and run the configured actions when someone leaves and comes back,
+    until stopped. Survives the keyboard being unplugged or the computer sleeping."""
+    cfg = presence_config()
+    desktop = Desktop(dry_run)
+    tracker = Presence(cfg["leave_after"], cfg["come_after"])
+    threshold, checked = cfg["distance_mm"], 0.0
+    desktop.log(f"presence: leave after {cfg['leave_after']:g} s: {', '.join(cfg['leave']) or '-'}"
+                f"{'; ' + cfg['leave_run'] if cfg['leave_run'] else ''}; come after {cfg['come_after']:g} s: "
+                f"{', '.join(cfg['come']) or '-'}{'; ' + cfg['come_run'] if cfg['come_run'] else ''}"
+                f"{' (dry run)' if dry_run else ''}; config {PRESENCE_CONFIG}"
+                f"{'' if os.path.exists(PRESENCE_CONFIG) else ' (not there: defaults)'}")
+    trouble, recent = None, []
+    while True:
+        try:
+            kb = Keyboard()  # locked only while reading, so other z20 runs go on
+            try:
+                if cfg["distance_mm"] is None and time.monotonic() - checked > 60:  # follow profile changes
+                    threshold = sensor_settings(kb.read_profile(kb.profile_number()))["distance_cm"] * 10
+                    checked = time.monotonic()
+                d = kb.distance()
+            finally:
+                kb.close()
+        except Z20Error as e:
+            if str(e) != trouble:
+                desktop.log(f"waiting for the keyboard: {e}")
+                trouble = str(e)
+            time.sleep(5)
+            continue
+        if trouble:
+            desktop.log("keyboard back")
+            trouble = None
+        recent = (recent + [d])[-5:]  # the median of the last 2.5 s: single readings jump around
+        event = tracker.update(sorted(recent)[len(recent) // 2] < threshold, time.monotonic())
+        if event:
+            desktop.log(f"{'left' if event == 'leave' else 'back'} ({d} mm, present within {threshold / 10:g} cm)")
+            for action in cfg[event]:
+                desktop.do(action)
+            if cfg[f"{event}_run"]:
+                desktop.run(cfg[f"{event}_run"])
+        time.sleep(0.5)
+
+
 def with_ram_lighting(kb, p, effect):
     """The stored profile p with the lighting in RAM over it: the effect number and the
     settings of `effect` (a number), as far as the RAM has them."""
@@ -1004,7 +1163,7 @@ def restore(kb, directory, profile=None, macro=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("status", "macros", "macro", "profile", "game-mode", "key", "light",
-                                            "color", "sensor", "backup", "restore"))
+                                            "color", "sensor", "presence", "backup", "restore"))
     parser.add_argument("values", nargs="*", help="see above")
     parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
     parser.add_argument("--macro", type=int, choices=MACRO_SLOTS, metavar="N", help="restore: only macro N")
@@ -1016,6 +1175,7 @@ def main():
     parser.add_argument("--brightness", type=int, choices=range(0, 101), metavar="P", help="percent")
     parser.add_argument("--cycle", type=int, metavar="MS", help="effect cycle in milliseconds")
     parser.add_argument("--live", action="store_true", help="light: in RAM only, until z20 light reload")
+    parser.add_argument("--dry-run", action="store_true", help="presence: say what it would do instead")
     parser.add_argument("--json", action="store_true", help="print as JSON")
     args = parser.parse_intermixed_args()  # options may also stand between the values
     v = args.values
@@ -1052,6 +1212,15 @@ def main():
             parser.error(f"macro name: 1 to {MACRO_NAME_MAX} bytes")
     if args.command == "restore" and len(v) != 1:
         parser.error("restore needs a backup directory")
+
+    if args.command == "presence":
+        if v:
+            parser.error("presence takes no values (settings: " + PRESENCE_CONFIG + ")")
+        try:
+            presence(args.dry_run)
+        except KeyboardInterrupt:
+            pass
+        return 0
 
     kb = Keyboard()
     try:

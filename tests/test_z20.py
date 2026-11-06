@@ -217,6 +217,58 @@ class Sensor(unittest.TestCase):
         self.assertEqual(z20.interface_event(bytes([2, 0xCD, 0])), "media key PlayPause")
 
 
+class PresenceService(unittest.TestCase):
+    def test_leave_and_come_after_their_times(self):
+        p = z20.Presence(leave_after=30, come_after=1)
+        events = [(t, p.update(near, t)) for t, near in ((0, True), (5, False), (20, True), (21, False),
+                                                        (50, False), (51, False), (60, True), (60.5, True),
+                                                        (61, True), (62, True))]
+        # away 5-20 is too short; away from 21 counts after 30 s; near from 60 counts after 1 s
+        self.assertEqual([(t, e) for t, e in events if e], [(51, "leave"), (61, "come")])
+
+    def test_config(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "presence.ini")
+            self.assertEqual(z20.presence_config(path)["leave"], ["pause-media"])  # no file: defaults
+            with open(path, "w") as f:
+                f.write("[presence]\nleave after = 20\ndistance = 45\nleave = lock, pause-media\n"
+                        "come = wake\nleave run = notify-send 'bye, see you'\n")
+            cfg = z20.presence_config(path)
+            self.assertEqual((cfg["leave_after"], cfg["come_after"], cfg["distance_mm"], cfg["leave"], cfg["come"],
+                              cfg["leave_run"], cfg["come_run"]),
+                             (20.0, 1.0, 450, ["lock", "pause-media"], ["wake"], "notify-send 'bye, see you'", ""))
+            with open(path, "w") as f:
+                f.write("[presence]\nleave = lock, explode\n")
+            with self.assertRaises(z20.Z20Error):
+                z20.presence_config(path)
+
+    def test_resume_only_what_was_paused(self):
+        class Desktop(z20.Desktop):
+            def __init__(self):
+                super().__init__()
+                self.state = {"org.mpris.MediaPlayer2.a": "Playing", "org.mpris.MediaPlayer2.b": "Paused"}
+                self.calls = []
+
+            def query(self, *args):
+                if args[0] == "call":
+                    return "as 3 " + " ".join(f'"{n}"' for n in [":1.5", *self.state])
+                return f's "{self.state[args[1]]}"'
+
+            def act(self, argv):
+                self.calls.append((argv[3], argv[-1]))
+
+        desktop = Desktop()
+        desktop.do("pause-media")
+        self.assertEqual(desktop.calls, [("org.mpris.MediaPlayer2.a", "Pause")])
+        desktop.calls = []
+        desktop.do("resume-media")
+        self.assertEqual(desktop.calls, [("org.mpris.MediaPlayer2.a", "Play")])
+        desktop.calls = []
+        desktop.do("resume-media")  # nothing paused any more
+        self.assertEqual(desktop.calls, [])
+
+
 class Answers(unittest.TestCase):
     def test_answer_must_belong_to_the_read(self):
         ask = report(8, 0xEA, 0x02, z20.READ, 1)

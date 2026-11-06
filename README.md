@@ -17,7 +17,9 @@ hidraw.
   by one or all at once
 - **Macros:** list them step by step; create, edit, rename and delete them
 - **Presence sensor:** its settings per profile (distance, what happens when
-  you come and go, welcome effect) and the live distance
+  you come and go, welcome effect) and the live distance; a service that
+  locks the screen, pauses media and the like each time you leave and come
+  back
 - **JSON output** for widgets and scripts
 
 Before every change it saves what it replaces, and after the write it reads
@@ -87,6 +89,8 @@ z20 sensor leave dark 30              when you leave, after 30 s: dark, lock, sl
 z20 sensor come wake 1                when you come, after 1 s: wake, unlock, nothing
 z20 sensor welcome thunder 3000       effect when you come (fade, rows, explosion, raining,
                                       barber, lightbar, thunder) and its length in ms
+z20 presence [--dry-run]              lock, pause media, screen off ... when you leave
+                                      (a service, see Presence service)
 z20 backup                            profiles 1-9 and macros to ~/.local/state/z20/backups/
 z20 restore DIR [--profile N | --macro N]
                                       write profiles and macros back from a backup
@@ -159,6 +163,49 @@ does its leave action only once after being plugged in or after a sensor
 change; the next time you leave, nothing happens. The sleep, wake and
 unlock actions are meant for Windows and haven't been tried on Linux: sleep
 may suspend the computer.
+
+### Presence service
+
+`z20 presence` watches the sensor and acts on the desktop each time you
+leave and come back. It runs as a systemd user service:
+
+```
+systemctl --user enable --now z20-presence.service
+journalctl --user -u z20-presence -f          # what it does
+z20 presence --dry-run                        # try: says what it would do
+```
+
+Settings in `~/.config/z20/presence.ini`, all optional:
+
+```ini
+[presence]
+# present when closer than this (cm); default: the active profile's sensor distance
+distance = 45
+# seconds away before "leave" runs, seconds near again before "come" runs
+leave after = 30
+come after = 1
+# actions: lock, screen-off, wake, pause-media, resume-media
+leave = lock, pause-media
+come = wake, resume-media
+# and a command of your own, if you like
+leave run = notify-send "z20" "see you"
+```
+
+`lock` is `loginctl lock-session`; `screen-off` and `wake` use KDE's
+`kscreen-doctor` and the screen saver's `SimulateUserActivity`;
+`pause-media` pauses the media players that are playing (MPRIS) and
+`resume-media` starts only those again. Without a config file: leave =
+`pause-media`, come = `wake, resume-media`. It reads the distance twice a
+second and decides on the median of the last five readings (single ones
+jump by a few centimetres), keeps waiting while the keyboard is unplugged
+or the computer sleeps, and lets other `z20` commands run in between.
+
+The sensor sees the nearest thing in front of it: a chair left near the
+distance you set looks like someone leaning back. Push the chair back or
+turn it aside when you leave, or set `distance` a little shorter than
+where the empty chair stands (`z20 sensor watch` shows both). The keyboard's
+own leave action wants even more room: it didn't act with the empty chair
+at 46-51 cm and the distance at 45 cm, only from about 70 cm on.
 
 To use E1-E5 as desktop shortcuts, give them keys no keyboard has, like
 `z20 key E4 key f14`, and bind those in the desktop's shortcut settings.

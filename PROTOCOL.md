@@ -118,7 +118,10 @@ Meta+L. The sleep, wake and unlock actions haven't been tried.
 
 The leave action fires **once**, then not again until the keyboard is
 plugged in or the active profile is written (report 8) and reloaded; a
-reload alone doesn't arm it again. Checked several times: after plugging
+reload alone doesn't arm it again. It also needs a clear absence: with
+the distance at 450 mm, 36 s of readings between 459 and 509 mm didn't
+count as gone; every absence that did read 0.7 m or more, or "nothing in
+range" (65533). Checked several times: after plugging
 in, the first walk-away locked and the second, with nothing sent in
 between, didn't; the same after a profile write and reload; after a plain
 reload, nothing. So the keyboard's own lock suits a single absence, not a
