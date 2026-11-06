@@ -114,11 +114,23 @@ the leave time is in seconds), and the welcome effect played on coming
 back; the keyboard sent no report on interface 1 either time. "Leave:
 lock" locked KDE about 10 s after leaving, again with nothing on interface
 1: the keyboard types Win+L on its keyboard interfaces, which KDE takes as
-Meta+L. The sleep, wake and unlock actions haven't been tried. The sensor
-settings are also in RAM, report 7 blocks `03` on, `04` distance, `05`
-come time, `06` come action, `07` leave time, `08` leave action, `09`
-welcome effect, `0A` welcome length, each the profile's value padded with
-zeros (checked: all eight equal). Unleash's sliders: 10-120
+Meta+L. The sleep, wake and unlock actions haven't been tried.
+
+The leave action fires **once**, then not again until the keyboard is
+plugged in or the active profile is written (report 8) and reloaded; a
+reload alone doesn't arm it again. Checked several times: after plugging
+in, the first walk-away locked and the second, with nothing sent in
+between, didn't; the same after a profile write and reload; after a plain
+reload, nothing. So the keyboard's own lock suits a single absence, not a
+day at the desk.
+
+The sensor settings are also in RAM, report 7 blocks `03` on, `04`
+distance, `05` come time, `06` come action, `07` leave time, `08` leave
+action, `09` welcome effect, `0A` welcome length, each the profile's value
+padded with zeros (checked: all eight equal). Unleash writes `03`-`08` in
+this order and then saves (`04 EA 02 12 00`). Whether the sensor's logic
+takes them from there is unclear (the tests ran into the once-only leave
+action), so `z20` writes the profile and reloads instead. Unleash's sliders: 10-120
 cm, come after 0-10 s, leave after 10-999 s; it offers come: nothing, wake
 up, unlock, and leave: nothing, sleep, lock, dark.
 

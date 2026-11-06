@@ -132,11 +132,10 @@ class LiveLighting(unittest.TestCase):
             z20.check_request(ram(block, z20.WRITE, b"\x05\x02"))
         bad = ram(0x0C, z20.WRITE, b"\x05\x02")
         bad[7] ^= 1
-        for block in range(0x03, 0x0B):  # the presence sensor
-            z20.check_request(ram(block, z20.WRITE, b"\x01"))
-        # 0B: key functions, 00/01: Unleash's sync previews, 02 and 16: unknown
-        for r in (bad, ram(0x0B, z20.WRITE), ram(0x0B, z20.READ), ram(0x01, z20.WRITE), ram(0x02, z20.READ),
-                  ram(0x16, z20.READ)):
+        # 03-0A: the presence sensor (writing it there stops its actions), 0B: key functions,
+        # 00/01: Unleash's sync previews, 02 and 16: unknown
+        for r in (bad, ram(0x03, z20.WRITE, b"\x01"), ram(0x08, z20.READ), ram(0x0B, z20.WRITE), ram(0x0B, z20.READ),
+                  ram(0x01, z20.WRITE), ram(0x02, z20.READ), ram(0x16, z20.READ)):
             with self.assertRaises(z20.Z20Error):
                 z20.check_request(r)
 
@@ -162,27 +161,30 @@ class RamUpdate(unittest.TestCase):
         def call(self, request, wait):
             r = bytearray(request).ljust(17, b"\0")
             z20.check_request(r)
-            if r[4] == z20.WRITE:
+            if r[3] == 0x12:
+                self.sent.append(("save",))
+            elif r[4] == z20.WRITE:
                 self.keys[r[5], r[7]] = bytes(r[8:12])
                 self.sent.append(("key", r[5], r[7]))
             return bytes(8) + self.keys.get((r[5], r[7]), bytes(4))
 
     def test_parts_go_to_ram(self):
         old = profile(1)
-        new = z20.set_sensor(z20.set_lighting(old, "static", [b"\x00\x00\xff"], None, None), ["leave", "lock"])
+        new = z20.set_lighting(old, "static", [b"\x00\x00\xff"], None, None)
         new[z20.P_FN_KEYS + 45 * 4:z20.P_FN_KEYS + 46 * 4] = b"\x00\x00\x6b\x00"
         kb = self.Keyboard()
         self.assertTrue(kb.update_ram(old, new))
         self.assertEqual(kb.sent, [("ram", 0x0C, b"\x01\x00"), ("ram", 0x0D, bytes(new[z20.P_STATIC:z20.P_STATIC + 2])),
-                                   ("ram", 0x08, b"\x02\x00"), ("key", 1, 45)])
+                                   ("key", 1, 45)])
 
     def test_other_changes_need_a_reload(self):
         old = profile(1)
-        new = bytearray(old)
-        new[10] ^= 1  # the name
-        kb = self.Keyboard()
-        self.assertFalse(kb.update_ram(old, new))
-        self.assertEqual(kb.sent, [])
+        renamed = bytearray(old)
+        renamed[10] ^= 1  # the name
+        for new in (renamed, z20.set_sensor(old, ["leave", "lock"])):  # the sensor: never through RAM
+            kb = self.Keyboard()
+            self.assertFalse(kb.update_ram(old, new))
+            self.assertEqual(kb.sent, [])
 
 
 class Sensor(unittest.TestCase):

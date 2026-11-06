@@ -134,9 +134,8 @@ P_SENSOR = 152
 COME = {"nothing": 0xFFFF, "wake": 1, "unlock": 2}  # 0, "turn on", isn't offered by Unleash
 LEAVE = {"nothing": 0xFFFF, "sleep": 1, "lock": 2, "dark": 3}  # 0, "turn off", neither
 WELCOME = {"fade": 16, "rows": 17, "explosion": 18, "raining": 19, "barber": 20, "lightbar": 21, "thunder": 22}
-# The sensor settings in RAM (report 7 blocks 03-0A): block -> (profile offset, size).
-RAM_SENSOR = {3: (P_SENSOR, 1), 4: (P_SENSOR + 1, 2), 5: (P_SENSOR + 3, 2), 6: (P_SENSOR + 5, 2),
-              7: (P_SENSOR + 7, 2), 8: (P_SENSOR + 9, 2), 9: (P_SENSOR + 27, 2), 10: (P_SENSOR + 29, 2)}
+# The sensor settings are also in RAM (report 7 blocks 03-0A); z20 doesn't write them there
+# (see update_ram).
 # Status reports on interface 1 (report 3): what changed on the keyboard itself.
 STATUS_EVENTS = {0: "profile", 1: "lighting effect", 2: "NKRO", 3: "Game Mode", 4: "reset to default",
                  6: "key position"}
@@ -260,9 +259,9 @@ def check_request(r):
         ok = ok and (r[3] == READ or (r[3] == WRITE and 1 <= r[4] <= 9 and r[7] == checksum(r)))
     elif rid == 6:  # colors per LED: show them (with the checksum) or stop
         ok = ok and r[3] in (0, 1) and r[4:7] == b"\0\0\0" and r[7] == checksum(r)
-    elif rid == 7:  # the active profile's sensor and lighting in RAM; block 0B (keys) stays closed
-        ok = (ok and (r[3] in RAM_SENSOR or RAM_EFFECT <= r[3] <= max(b for b, _, _ in RAM_BLOCKS.values()))
-              and r[5] == 0 and (r[4] == READ or r[4] == WRITE and r[7] == checksum(r)))
+    elif rid == 7:  # the active profile's lighting in RAM; the sensor (03-0A) and keys (0B) stay closed
+        ok = (ok and RAM_EFFECT <= r[3] <= max(b for b, _, _ in RAM_BLOCKS.values()) and r[5] == 0
+              and (r[4] == READ or r[4] == WRITE and r[7] == checksum(r)))
     elif rid == 9 and r[3] == WRITE:  # a macro: stored (status 1) or deleted (FF)
         ok = (ok and r[4] in MACRO_SLOTS and r[7] == checksum(r) and r[1031] in (1, 0xFF)
               and r[8] <= MACRO_NAME_MAX and r[62] | r[63] << 8 <= MACRO_DATA_MAX)
@@ -405,8 +404,10 @@ class Keyboard:
         sensor blocks, single key functions, each read back. A reload would restart the
         lighting effect, and one set to start on a key press stays dark until then. False
         (nothing sent) if something changed that has no part in RAM: then reload."""
-        parts = [(RAM_EFFECT, P_EFFECT, 2), *RAM_BLOCKS.values(),
-                 *((block, at, size) for block, (at, size) in RAM_SENSOR.items())]
+        # Not the sensor's settings: whether their RAM copies (report 7 blocks 03-0A) reach the
+        # sensor's logic is unclear, while a profile write and reload applies them and arms its
+        # leave action again (checked), so a sensor change returns False here.
+        parts = [(RAM_EFFECT, P_EFFECT, 2), *RAM_BLOCKS.values()]
         keys = [(layer, pos, base + pos * 4) for layer, base in ((0, P_KEYS), (1, P_FN_KEYS)) for pos in range(121)]
         covered = {i for _, at, size in parts for i in range(at, at + size)}
         covered |= {i for _, _, at in keys for i in range(at, at + 4)}

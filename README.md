@@ -154,7 +154,9 @@ while you sit, lean back and walk away; set the distance between your
 sitting and your empty-desk values (`z20 sensor distance 45`). The keyboard
 reports nothing to the computer when you come or go; `watch` reads the
 distance twice a second. `leave lock` works on KDE: the keyboard types
-Win+L, which KDE takes as Meta+L and locks the screen. The sleep, wake and
+Win+L, which KDE takes as Meta+L and locks the screen. But the keyboard
+does its leave action only once after being plugged in or after a sensor
+change; the next time you leave, nothing happens. The sleep, wake and
 unlock actions are meant for Windows and haven't been tried on Linux: sleep
 may suspend the computer.
 
