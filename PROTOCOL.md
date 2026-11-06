@@ -299,6 +299,12 @@ bytes. Sent without reading an answer, as Unleash does for its software
 effects, which send a new frame for each step. Checked: one frame stays
 until it is ended.
 
+Unleash's custom (layer) effects send a frame every 40 ms, 25 a second. Its
+own rainbow wave places the LEDs on a grid of 21 columns and 6 rows (the
+macro keys E1-E5 in the first column, the numpad's right edge in the last);
+the light bars LeftBar1-9 and RightBar1-9 run top to bottom, in the first
+and last column.
+
 ## Reports 9 and 10: macros
 
 The keyboard keeps up to 100 macros.

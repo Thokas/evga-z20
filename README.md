@@ -9,6 +9,9 @@ hidraw.
   stars, reactive and more, with color, brightness and speed
 - **Live lighting:** the same effects in RAM only (for scripts and widgets,
   without wearing the flash), and colors per key, light bar LED and logo
+- **Software effects:** aurora, fire, rain, ripple, scanner and a color
+  gradient, worked out by `z20` and sent 25 times a second over the lighting,
+  as a user service that also starts after login
 - **Profiles and Game Mode:** switch profiles 1–9, turn Game Mode on or off
 - **Backup and restore** of all nine profiles and the stored macros
 - **Keys:** see and change what any key does, also the macro keys E1–E5 and
@@ -58,6 +61,7 @@ z20 macros [--json]                   stored macros, step by step
 z20 macro new Hi "LShift down, H, LShift up, I"
                                       store a macro in a free slot (prints its number)
 z20 macro edit 5 "ctrl down, c, ctrl up" | rename 5 Copy | delete 5
+z20 profile [--json]                  the profiles 1-9 with their names
 z20 profile N                         switch to profile 1-9 (also Fn + 1-9)
 z20 profile rename 2 Games | copy 1 2 rename a profile; copy profile 1's settings into 2
 z20 rate [1000 | 2000 | 4000]         report rate (Hz) of the active profile
@@ -91,6 +95,11 @@ z20 light default | sensor default    back to the factory setting
 z20 color all 000000 w,a,s,d ff0000   colors per LED over the lighting (later calls add);
                                       also e1, LeftBar1-9, RightBar1-9, Logo1-4, keys, bars, logo
 z20 color off                         back to the profile's lighting
+z20 animate fire                      a software effect, until Ctrl+C: aurora, fire, rain,
+                                      ripple, scanner, gradient [COLOR ...] [--cycle MS]
+                                      [--brightness P]
+z20 animate fire --save | --live      as the z20-animate service: also after login, or for now
+z20 animate off | reload | --json     stop it; back to the saved one; what runs
 z20 sensor [--json]                   presence sensor settings and the distance now
 z20 sensor watch                      distance, present / away and keyboard events, live
 z20 sensor on | off | distance 45     present: closer than 45 cm (10-120)
@@ -102,6 +111,7 @@ z20 events [--json] [--wait S]        what the keyboard reports itself (profile,
                                       Game Mode changed with its keys, media keys); with
                                       --wait only the first event within S seconds
 z20 presence [--dry-run]              lock, pause media, screen off ... when you leave
+z20 presence settings [--json]        what it does: presence.ini with its defaults
                                       (a service, see Presence service)
 z20 backup                            profiles 1-9 and macros to ~/.local/state/z20/backups/
 z20 restore DIR [--profile N | --macro N]
@@ -175,6 +185,34 @@ does its leave action only once after being plugged in or after a sensor
 change; the next time you leave, nothing happens. The sleep, wake and
 unlock actions are meant for Windows and haven't been tried on Linux: sleep
 may suspend the computer.
+
+### Software effects
+
+Beyond its own effects, the keyboard shows any colors per LED that it is
+sent. `z20 animate` works out every LED's color and sends a frame 25 times a
+second, as Unleash does for its custom effects. Working out a frame takes
+well under a millisecond; sending it holds the keyboard for a few
+milliseconds, so other `z20` commands (and the widget) go on in between.
+
+```
+z20 animate aurora                       flowing color fields (default: green, blue, violet)
+z20 animate fire                         flames from the bottom row (colors: embers to tips)
+z20 animate rain 00ff40 c0ffc0           drops falling down the columns (trail, drop)
+z20 animate ripple ff0000 0000ff         rings spreading from random keys
+z20 animate scanner ff0000 --cycle 1500  a light running from side to side
+z20 animate gradient ff0080 0080ff       a still gradient from left to right
+z20 animate fire --save                  run it as the z20-animate user service, also after login
+z20 animate off                          stop it: the profile's lighting shows again
+```
+
+The effects use a map of where each LED sits (keys in key widths, the light
+bars at the sides), ISO or ANSI as the keyboard is. They pause while the
+screen is locked (the keyboard's own lighting shows then) and while the
+keyboard is unplugged. One runs at a time; a new one replaces the last.
+`--save` keeps the effect in `~/.config/z20/animation.ini` and enables the
+`z20-animate` service; `--live` runs it in the service only until
+`z20 animate reload` (back to the saved one) or logging out. While one
+runs, `z20 light` changes the lighting underneath it.
 
 ### Presence service
 
@@ -302,7 +340,8 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 ## Uninstall
 
 ```
-rm ~/.local/bin/z20
+systemctl --user disable --now z20-presence.service z20-animate.service
+rm ~/.local/bin/z20 ~/.config/systemd/user/z20-presence.service ~/.config/systemd/user/z20-animate.service
 sudo rm /etc/udev/rules.d/70-evga-z20.rules
 rm -r ~/.local/state/z20         # the backups too
 ```

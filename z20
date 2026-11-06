@@ -8,6 +8,7 @@
   z20 macro edit N STEPS | rename N NAME | delete N
                                         STEPS as z20 macros prints them; a key, "left click"
                                         or media key alone is pressed and let go
+  z20 profile [--json]                  the profiles 1-9 with their names (* the active one)
   z20 profile N                         switch to profile 1-9
   z20 profile rename N NAME | copy N M  rename a profile; copy N's settings into M (M keeps its name)
   z20 rate [1000 | 2000 | 4000]         report rate (Hz) of the active profile
@@ -42,6 +43,21 @@
                                         z20 color off; LEDS: w,a,s,d, e1, LeftBar1-9, RightBar1-9,
                                         Logo1-4, or all, keys, bars, logo. Later calls add to it.
   z20 color off
+  z20 animate [--json]                  the software effect that runs, if any
+  z20 animate aurora | fire | rain | ripple | scanner | gradient [COLOR ...]
+                                        an effect z20 works out and sends 25 times a second, over
+                                        the profile's lighting: here until Ctrl+C; it pauses while
+                                        the screen is locked. Colors: up to 8 (rain: trail, drop;
+                                        scanner: 1); without, its own
+  z20 animate ... --cycle MS            speed: length of one cycle (gradient: drifts with one)
+  z20 animate ... --brightness P        percent (0-100)
+  z20 animate ... --save                run it as the z20-animate user service, also after the
+                                        next login (settings: ~/.config/z20/animation.ini)
+  z20 animate ... --live                run it as the service for now: gone with z20 animate
+                                        reload, z20 animate off or logging out
+  z20 animate off [--live]              stop it; --live: only until z20 animate reload or the
+                                        next login
+  z20 animate reload                    back to the saved effect (--save), or none
   z20 sensor [--json]                   the presence sensor's settings and the distance now
   z20 sensor watch [--json]             distance and presence as they change, and what the
                                         keyboard reports, until Ctrl+C
@@ -55,6 +71,7 @@
   z20 presence [--dry-run]              act on the desktop when you leave and come back
                                         (settings: ~/.config/z20/presence.ini; runs until stopped,
                                         as the systemd user service z20-presence)
+  z20 presence settings [--json]        what z20 presence does: presence.ini with its defaults
   z20 events [--json] [--wait S]        what the keyboard reports on its own: profile, effect and
                                         Game Mode changed with its keys, media keys (until Ctrl+C,
                                         or only the first event within S seconds)
@@ -77,10 +94,13 @@ import configparser
 import fcntl
 import glob
 import json
+import math
 import os
+import random
 import re
 import select
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -312,7 +332,7 @@ def check_answer(report, answer):
 
 
 class Keyboard:
-    def __init__(self):
+    def __init__(self, lock=True):
         path, self.model = find_keyboard()
         try:
             self.fd = os.open(path, os.O_RDWR)
@@ -320,7 +340,8 @@ class Keyboard:
             raise Z20Error(f"no access to {path}: install udev/70-evga-z20.rules") from None
         # One z20 at a time (a widget may poll while a command runs): the keyboard keeps a
         # single answer per report, which a second request in between would replace.
-        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        if lock:
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
         self.changed = False  # previous/ is emptied before this run's first change
 
     def save_previous(self, reports):
@@ -362,6 +383,14 @@ class Keyboard:
         except OSError as e:
             raise Z20Error(f"keyboard: {e.strerror} (unplugged?)") from None
         time.sleep(0.005)
+
+    def send_locked(self, request):
+        """send() for a Keyboard opened with lock=False: holds the lock only while sending."""
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        try:
+            self.send(request)
+        finally:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
 
     def read_ram(self, block):
         return self.call(bytes([7, *HEADER, block, READ]), 0.005)[8:]
@@ -1132,6 +1161,410 @@ def colors_shown(frame):
     return out
 
 
+# Software effects (z20 animate): z20 works out every LED's color and sends a frame (report 6)
+# 25 times a second, as Unleash does for its custom effects (a 40 ms timer). Effect: default
+# colors, at most that many colors, cycle in ms (None: it stands still unless given one).
+ANIMATIONS = {"aurora": (["00ff90", "00a0ff", "6020ff"], 8, 10000),
+              "fire": (["ff0000", "ff6000", "ffc000"], 8, 800),
+              "rain": (["00ff40", "c0ffc0"], 2, 1500),
+              "ripple": (["00c0ff", "ff00c0", "ffc000"], 8, 2500),
+              "scanner": (["ff0000"], 1, 2000),
+              "gradient": (["ff0080", "8000ff", "0080ff"], 8, None)}
+FRAME_S = 0.04
+ANIMATION_STATE = os.path.join(STATE, "animation.json")  # what runs now, and its process
+ANIMATION_CONFIG = os.path.expanduser("~/.config/z20/animation.ini")  # --save: run by the service
+ANIMATION_LIVE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or STATE, "z20-animation.ini")  # --live
+ANIMATION_SERVICE = "z20-animate.service"
+
+
+def led_layout(iso=True):
+    """{LED position: (x, y)}: where each LED sits, in key widths from the top left (key
+    centers), on a full-size keyboard (ISO or ANSI) with the macro keys E1-E5 to the left of
+    the main block and the light bars at the sides. The scroll wheel has no LEDs here; where the logo
+    LEDs sit isn't known, so they are put above the middle."""
+    by_name = {name: pos for pos, name in LED_NAMES.items()}
+    out = {}
+
+    def keys(y, x, *names):  # left to right from x; "Tab:1.5" is 1.5 keys wide
+        for key in names:
+            name, _, width = key.partition(":")
+            width = float(width or 1)
+            out[by_name[name]] = (x + width / 2, y)
+            x += width
+
+    m = 1.25  # where the main block starts
+    keys(0.5, 0, "Game")
+    keys(0.5, m, "Esc")
+    keys(0.5, m + 2, "F1", "F2", "F3", "F4")
+    keys(0.5, m + 6.5, "F5", "F6", "F7", "F8")
+    keys(0.5, m + 11, "F9", "F10", "F11", "F12")
+    keys(0.5, m + 15.25, "PrintScreen", "ScrollLock", "Pause")
+    keys(0.5, m + 18.5, "PrevTrack", "PlayPause", "NextTrack", "Mute")
+    for y, name in zip((2, 3, 4, 5, 6), E_KEYS):
+        keys(y, 0, name)
+    keys(2, m, "`", *"1234567890", "-", "=", "Backspace:2")
+    keys(2, m + 15.25, "Insert", "Home", "PageUp")
+    keys(2, m + 18.5, "NumLock", "KP/", "KP*", "KP-")
+    if iso:
+        keys(3, m, "Tab:1.5", *"QWERTYUIOP", "[", "]")
+        keys(3.5, m + 13.75, "Enter:1.25")
+        keys(4, m, "CapsLock:1.75", *"ASDFGHJKL", ";", "'", "#")
+        keys(5, m, "LShift:1.25", "ISO\\", *"ZXCVBNM", "Comma", ".", "/", "RShift:2.75")
+    else:
+        keys(3, m, "Tab:1.5", *"QWERTYUIOP", "[", "]", "\\:1.5")
+        keys(4, m, "CapsLock:1.75", *"ASDFGHJKL", ";", "'", "Enter:2.25")
+        keys(5, m, "LShift:2.25", *"ZXCVBNM", "Comma", ".", "/", "RShift:2.75")
+    keys(3, m + 15.25, "Delete", "End", "PageDown")
+    keys(3, m + 18.5, "KP7", "KP8", "KP9")
+    keys(3.5, m + 21.5, "KPPlus")
+    keys(4, m + 18.5, "KP4", "KP5", "KP6")
+    keys(5, m + 16.25, "Up")
+    keys(5, m + 18.5, "KP1", "KP2", "KP3")
+    keys(5.5, m + 21.5, "KPEnter")
+    keys(6, m, "LCtrl:1.25", "LGUI:1.25", "LAlt:1.25", "Space:6.25", "RAlt:1.25", "Fn:1.25", "Menu:1.25",
+         "RCtrl:1.25")
+    keys(6, m + 15.25, "Left", "Down", "Right")
+    keys(6, m + 18.5, "KP0:2", "KP.")
+    for i in range(9):  # top to bottom, as Unleash's wave runs them
+        out[160 + i] = (-0.75, 0.25 + i * 0.75)
+        out[176 + i] = (m + 23.25, 0.25 + i * 0.75)
+    for i in range(4):
+        out[192 + i] = (m + 9.75 + i * 0.5, -0.5)
+    return out
+
+
+def blend(colors, t, cyclic=False):
+    """The color at t (0-1) along colors ((r, g, b) 0-255), mixed between the two nearest;
+    cyclic: the last blends back into the first, and t wraps around."""
+    n = len(colors)
+    if n == 1:
+        return tuple(colors[0])
+    if cyclic:
+        f = t % 1 * n
+        i, j = int(f) % n, (int(f) + 1) % n
+    else:
+        f = min(max(t, 0.0), 1.0) * (n - 1)
+        i = min(int(f), n - 2)
+        j = i + 1
+    k = f - int(f) if cyclic else f - i
+    return tuple(a + (b - a) * k for a, b in zip(colors[i], colors[j]))
+
+
+def scaled(color, k):
+    return tuple(c * k for c in color)
+
+
+def animation(effect, colors, cycle_ms, layout, rng=random):
+    """The effect as a function of the time (s since it began) that gives every LED in the
+    layout its color ((r, g, b) 0-255). Some effects keep state (flames, drops, ripples), so
+    the times have to come in order."""
+    xs, ys = [x for x, _ in layout.values()], [y for _, y in layout.values()]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    cycle = cycle_ms / 1000 if cycle_ms else None
+    if effect == "gradient":  # the colors from left to right; drifting with a cycle
+        return lambda t: {p: blend(colors, (x - x0) / (x1 - x0) + (t / cycle if cycle else 0), cyclic=bool(cycle))
+                          for p, (x, y) in layout.items()}
+    if effect == "aurora":  # soft color fields, flowing through all the colors
+        def aurora(t):
+            s = 2 * math.pi * t / cycle
+            cx = (x0 + x1) / 2 + (x1 - x0) / 3 * math.sin(s)
+            cy = (y0 + y1) / 2 + (y1 - y0) / 2 * math.cos(2 * s)
+            out = {}
+            for p, (x, y) in layout.items():
+                a = (math.sin(x * 0.3 + s) + math.sin(y * 0.8 - 2 * s) + math.sin((x + y) * 0.2 + 3 * s)
+                     + math.sin(math.hypot(x - cx, y - cy) * 0.5 - 2 * s))
+                out[p] = blend(colors, a / 5 + t / cycle, cyclic=True)
+            return out
+        return aurora
+    if effect == "scanner":  # a light running from side to side and back
+        def scanner(t):
+            at = x0 + (x1 - x0) * (1 - math.cos(2 * math.pi * t / cycle)) / 2
+            return {p: scaled(colors[0], math.exp(-((x - at) / 1.5) ** 2)) for p, (x, y) in layout.items()}
+        return scanner
+    if effect == "fire":  # flames rising from the bottom row, the colors from embers to tips
+        cols, rows = int(x1 - x0) + 3, int(y1 - y0) + 3  # a cell per key; the bottom row feeds the flames
+        heat = [[0.0] * cols for _ in range(rows)]
+        before = [row[:] for row in heat]
+        step = cycle / rows  # the flames rise a row in this time
+        palette = [(0, 0, 0), *colors]
+        last = [0.0]
+
+        def fire(t):
+            if t - last[0] > 1:
+                last[0] = t - step
+            while last[0] + step <= t:
+                last[0] += step
+                before[:] = [row[:] for row in heat]
+                heat[-1] = [rng.random() ** 0.4 for _ in range(cols)]  # mostly hot, now and then a gap
+                for r in range(rows - 1):
+                    for c in range(cols):
+                        below = heat[r + 1][min(max(c + rng.randint(-1, 1), 0), cols - 1)]
+                        heat[r][c] = max(0.0, below - rng.random() * 3.2 / rows)
+            k = (t - last[0]) / step  # between the last two steps
+            out = {}
+            for p, (x, y) in layout.items():
+                r, c = round((y - y0) / (y1 - y0) * (rows - 2)), round(x - x0) + 1
+                out[p] = blend(palette, (before[r][c] + (heat[r][c] - before[r][c]) * k) ** 1.3)  # darker tips
+            return out
+        return fire
+    if effect == "rain":  # drops falling down each column with a fading trail
+        cols, trail = int(x1 - x0) + 2, 2.5
+        speed = (y1 - y0 + trail) / cycle
+        drops = [y0 - rng.random() * 2 * (y1 - y0 + trail) for _ in range(cols)]
+        speeds = [speed * (0.7 + 0.6 * rng.random()) for _ in range(cols)]
+        head = colors[1] if len(colors) > 1 else colors[0]
+        last = [None]
+
+        def rain(t):
+            dt = 0.0 if last[0] is None else min(t - last[0], 1.0)
+            last[0] = t
+            for c in range(cols):
+                drops[c] += speeds[c] * dt
+                if drops[c] - trail > y1 + 0.5:  # gone: the next one after a pause
+                    drops[c] = y0 - 0.5 - rng.random() * (y1 - y0) / 2
+                    speeds[c] = speed * (0.7 + 0.6 * rng.random())
+            out = {}
+            for p, (x, y) in layout.items():
+                d = drops[round(x - x0)] - y  # how far the drop is below this LED
+                if -0.5 <= d < 0.5:
+                    out[p] = head
+                elif 0.5 <= d < trail:
+                    out[p] = scaled(colors[0], 1 - (d - 0.5) / (trail - 0.5))
+                else:
+                    out[p] = (0, 0, 0)
+            return out
+        return rain
+    if effect == "ripple":  # rings spreading from random keys, one color after another
+        spots = [layout[p] for p in KEY_POSITIONS if p in layout]
+        ripples = []  # x, y, start, color
+        due, count = [0.0], [0]
+
+        def ripple(t):
+            if due[0] < t - cycle:
+                due[0] = t
+            while due[0] <= t:
+                x, y = rng.choice(spots)
+                ripples.append((x, y, due[0], colors[count[0] % len(colors)]))
+                count[0] += 1
+                due[0] += cycle / 4 * (0.5 + rng.random())
+            ripples[:] = [r for r in ripples if t - r[2] < cycle]
+            out = {}
+            for p, (x, y) in layout.items():
+                mix = [0.0, 0.0, 0.0]
+                for rx, ry, start, color in ripples:
+                    age = (t - start) / cycle
+                    k = math.exp(-((math.hypot(x - rx, y - ry) - age * 10) / 1.5) ** 2) * (1 - age)
+                    mix = [m + c * k for m, c in zip(mix, color)]
+                out[p] = tuple(min(m, 255.0) for m in mix)
+            return out
+        return ripple
+    raise Z20Error(f"no effect {effect}")
+
+
+def animation_frame(colors, level):
+    """An LED frame from {position: (r, g, b)}, every LED at the given brightness (0-255)."""
+    frame = bytearray(LED_COUNT * 4)
+    for pos, color in colors.items():
+        frame[pos * 4:pos * 4 + 4] = bytes([level, *(min(max(round(c), 0), 255) for c in color)])
+    return frame
+
+
+def screen_locked(desktop):
+    answer = desktop.query("call", "org.freedesktop.ScreenSaver", "/ScreenSaver", "org.freedesktop.ScreenSaver",
+                           "GetActive")
+    return answer.split() == ["b", "true"]
+
+
+def animation_state():
+    """What z20 animate runs now ({pid, effect, colors, cycle_ms, brightness, how}), or None."""
+    try:
+        with open(ANIMATION_STATE) as f:
+            state = json.load(f)
+        with open(f"/proc/{int(state['pid'])}/cmdline", "rb") as f:
+            if b"animate" not in f.read():  # that process ended, and the number went to another
+                return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return state
+
+
+def end_animation():
+    """Stop the z20 animate that runs (it shows the profile's lighting again when it ends)."""
+    state = animation_state()
+    if not state or state["pid"] == os.getpid():
+        return
+    os.kill(state["pid"], signal.SIGTERM)
+    for _ in range(30):
+        time.sleep(0.1)
+        if not animation_state():
+            return
+
+
+def run_animation(effect, colors, cycle, brightness, how):
+    """Send the effect's frames until stopped (Ctrl+C, SIGTERM, a new z20 animate). It holds
+    the keyboard only while sending a frame, so other z20 runs go on in between; it pauses
+    while the screen is locked and while the keyboard is unplugged."""
+    end_animation()
+
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    save_json(ANIMATION_STATE, {"pid": os.getpid(), "effect": effect, "colors": colors, "cycle_ms": cycle,
+                                "brightness": brightness, "how": how})
+    colors_at = None  # once the keyboard is there: its layout (ISO or ANSI)
+    level = 0xFF if brightness is None else round(brightness * 255 / 100)
+    desktop, kb, shown, sent, locked, looked = Desktop(), None, None, 0.0, False, -10.0
+    start = time.monotonic()
+    try:
+        while True:
+            now = time.monotonic()
+            if now - looked >= 2:
+                locked, looked = screen_locked(desktop), now
+            try:
+                if kb is None:
+                    kb = Keyboard(lock=False)
+                if colors_at is None:
+                    layout = led_layout(iso=kb.model.endswith("ISO"))
+                    colors_at = animation(effect, [tuple(parse_color(c)) for c in colors], cycle, layout)
+                if locked:
+                    if shown is not None:
+                        kb.send_locked(bytes([6, *HEADER, 0]))  # the profile's lighting while locked
+                        shown = None
+                    time.sleep(0.5)
+                    continue
+                frame = animation_frame(colors_at(now - start), level)
+                if frame != shown or now - sent >= 1:  # still effects: once a second
+                    kb.send_locked(color_report(frame))
+                    shown, sent = frame, now
+            except Z20Error:  # unplugged: wait for it
+                if kb:
+                    kb.close()
+                kb, shown = None, None
+                time.sleep(2)
+            time.sleep(max(0.0, FRAME_S - (time.monotonic() - now)))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        try:
+            kb = kb or Keyboard(lock=False)
+            kb.send_locked(bytes([6, *HEADER, 0]))
+        except Z20Error:
+            pass
+        if kb:
+            kb.close()
+        if (animation_state() or {}).get("pid") == os.getpid():
+            os.remove(ANIMATION_STATE)
+
+
+def save_json(path, data):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump(data, f)
+
+
+def write_animation(path, effect, colors, cycle, brightness):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(f"# z20 animate {effect} ... --save writes this; the z20-animate service runs it.\n"
+                f"[animation]\neffect = {effect}\ncolors = {', '.join(colors)}\n"
+                + (f"cycle = {cycle}\n" if cycle else "") + (f"brightness = {brightness}\n" if brightness is not None else ""))
+
+
+def saved_animation():
+    """(effect, colors, cycle, brightness, how) from the --live file, else the --save one; or None."""
+    for path, how in ((ANIMATION_LIVE, "live"), (ANIMATION_CONFIG, "saved")):
+        if not os.path.exists(path):
+            continue
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read(path)
+            section = parser["animation"]
+            effect = section["effect"]
+            colors = [c.strip().lstrip("#") for c in section.get("colors", "").split(",") if c.strip()]
+            cycle = int(section["cycle"]) if section.get("cycle") else None
+            brightness = int(section["brightness"]) if section.get("brightness") else None
+        except (configparser.Error, KeyError, ValueError) as e:
+            raise Z20Error(f"{path}: {e}") from None
+        check_animation(effect, colors, cycle, brightness, path)
+        return effect, colors or ANIMATIONS[effect][0], cycle or ANIMATIONS[effect][2], brightness, how
+    return None
+
+
+def check_animation(effect, colors, cycle, brightness, where="animate"):
+    if effect not in ANIMATIONS:
+        raise Z20Error(f"{where}: no effect {effect} ({', '.join(ANIMATIONS)})")
+    most = ANIMATIONS[effect][1]
+    if len(colors) > most:
+        raise Z20Error(f"{where}: {effect} takes at most {most} color{'s' if most > 1 else ''}")
+    for c in colors:
+        parse_color(c)
+    if cycle is not None and not 100 <= cycle <= 600000:
+        raise Z20Error(f"{where}: cycle 100-600000 ms")
+    if brightness is not None and not 0 <= brightness <= 100:
+        raise Z20Error(f"{where}: brightness 0-100")
+
+
+def systemctl(*args, check=False):
+    try:
+        done = subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if check:
+            raise Z20Error(f"systemctl: {e}") from None
+        return ""
+    if check and done.returncode:
+        raise Z20Error(f"systemctl --user {' '.join(args)}: {done.stderr.strip() or done.returncode}"
+                       + (" (install.sh installs the z20-animate service)" if "not found" in done.stderr else ""))
+    return done.stdout.strip()
+
+
+def started(effect):
+    """The state once the service runs the effect (it takes a moment to start)."""
+    for _ in range(30):
+        state = animation_state()
+        if state and state["effect"] == effect or effect is None:
+            return state
+        time.sleep(0.1)
+    return animation_state()
+
+
+def animate_command(v, args):
+    """z20 animate [EFFECT ... | off | reload | saved]; returns what to print."""
+    if not v:
+        return animation_state()
+    if v[0] == "saved":  # what the service runs
+        saved = saved_animation()
+        if saved:
+            run_animation(*saved)
+        return None
+    if v[0] in ("off", "reload"):
+        if os.path.exists(ANIMATION_LIVE):
+            os.remove(ANIMATION_LIVE)
+        if v[0] == "reload" and systemctl("is-enabled", ANIMATION_SERVICE) == "enabled":
+            systemctl("restart", ANIMATION_SERVICE, check=True)  # back to the saved effect
+            return started(saved_animation()[0] if saved_animation() else None)
+        else:
+            if v[0] == "off" and not args.live:
+                systemctl("disable", "--now", ANIMATION_SERVICE)  # also not after the next login
+            else:
+                systemctl("stop", ANIMATION_SERVICE)
+            end_animation()  # one running in a terminal, too
+        return animation_state()
+    effect, colors = v[0], [c.lstrip("#") for c in v[1:]] or ANIMATIONS[v[0]][0]
+    cycle = args.cycle or ANIMATIONS[effect][2]
+    check_animation(effect, colors, cycle, args.brightness)
+    if args.save or args.live:
+        write_animation(ANIMATION_LIVE if args.live else ANIMATION_CONFIG, effect, colors, cycle, args.brightness)
+        if args.save:
+            if os.path.exists(ANIMATION_LIVE):
+                os.remove(ANIMATION_LIVE)
+            systemctl("enable", ANIMATION_SERVICE, check=True)
+        systemctl("restart", ANIMATION_SERVICE, check=True)
+        return started(effect)
+    run_animation(effect, colors, cycle, args.brightness, "here")
+    return None
+
+
 # Parts of a profile that "default" takes from the factory profile (offset, size): the effect
 # and the effects Unleash's own lighting reset copies (static to stars), and the sensor.
 FACTORY_LIGHTING = [(P_EFFECT, 2), (P_STATIC, P_FADE - P_STATIC)]
@@ -1238,8 +1671,32 @@ def status(kb):
         changed[label] = {"text": text, **info}
     return {"model": kb.model, "firmware": kb.firmware(), "profile": n, "profile_name": profile_name(p),
             "game_mode": kb.game_mode(), "game_mode_blocks": game_keys(p), "nkro": kb.nkro(),
-            "report_rate": rate_hz(p), "lighting": lighting(p),
+            "report_rate": rate_hz(p), "lighting": lighting(p), "animation": animation_info(),
             "keys": keys, "changed_keys": changed, "macros": {str(m): name for m, name in names.items()}}
+
+
+def animation_info():
+    state = animation_state()
+    return {k: state[k] for k in ("effect", "colors", "cycle_ms", "brightness", "how")} if state else None
+
+
+def animation_text(state):
+    if not state:
+        return "no software effect runs (z20 animate)"
+    where = {"here": "in a terminal", "saved": "saved, the z20-animate service",
+             "live": "for now, the z20-animate service"}.get(state["how"], state["how"])
+    return " ".join([f"z20 animate {state['effect']}", *("#" + c for c in state["colors"]),
+                     *([f"{state['cycle_ms']} ms"] if state["cycle_ms"] else []),
+                     *([f"{state['brightness']} %"] if state["brightness"] is not None else [])]) + f" ({where})"
+
+
+def presence_settings():
+    cfg = presence_config()
+    steps = lambda event: [{"action": a, "after_s": d} for a, d in cfg[event]]
+    return {"config": PRESENCE_CONFIG, "exists": os.path.exists(PRESENCE_CONFIG),
+            "leave_after_s": cfg["leave_after"], "come_after_s": cfg["come_after"],
+            "distance_cm": cfg["distance_mm"] / 10 if cfg["distance_mm"] else None,
+            "leave": steps("leave"), "come": steps("come"), "leave_run": cfg["leave_run"], "come_run": cfg["come_run"]}
 
 
 def macros(kb):
@@ -1335,8 +1792,8 @@ def restore(kb, directory, profile=None, macro=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("status", "macros", "macro", "profile", "rate", "nkro", "game-mode",
-                                            "key", "light", "color", "sensor", "presence", "events", "backup",
-                                            "restore"))
+                                            "key", "light", "color", "animate", "sensor", "presence", "events",
+                                            "backup", "restore"))
     parser.add_argument("values", nargs="*", help="see above")
     parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
     parser.add_argument("--macro", type=int, choices=MACRO_SLOTS, metavar="N", help="restore: only macro N")
@@ -1349,14 +1806,16 @@ def main():
     parser.add_argument("--cycle", type=int, metavar="MS", help="effect cycle in milliseconds")
     parser.add_argument("--direction", choices=("up", "down", "left", "right", "cw", "ccw"),
                         help="light wave / spiral: which way it runs")
-    parser.add_argument("--live", action="store_true", help="light: in RAM only, until z20 light reload")
+    parser.add_argument("--live", action="store_true", help="light: in RAM only, until z20 light reload; "
+                                                             "animate: for now, as the service")
+    parser.add_argument("--save", action="store_true", help="animate: as the service, also after the next login")
     parser.add_argument("--dry-run", action="store_true", help="presence: say what it would do instead")
     parser.add_argument("--wait", type=float, metavar="S", help="events: only the first within S seconds")
     parser.add_argument("--json", action="store_true", help="print as JSON")
     args = parser.parse_intermixed_args()  # options may also stand between the values
     v = args.values
     number = lambda s: re.fullmatch(r"[1-9]", s) is not None
-    if args.command == "profile" and not (len(v) == 1 and number(v[0]) or
+    if args.command == "profile" and v and not (len(v) == 1 and number(v[0]) or
                                           len(v) == 3 and v[0] == "rename" and number(v[1]) or
                                           len(v) == 3 and v[0] == "copy" and number(v[1]) and number(v[2])
                                           and v[1] != v[2]):
@@ -1372,8 +1831,22 @@ def main():
         parser.error("rate: 1000, 2000 or 4000")
     if args.command == "nkro" and (len(v) != 1 or v[0] not in ("on", "off")):
         parser.error("nkro: on or off")
-    if args.live and (args.command != "light" or not v or v[0] in ("reload", "default") or args.profile):
-        parser.error("--live: for z20 light EFFECT, on the active profile")
+    if args.live and args.command != "animate" and (args.command != "light" or not v or v[0] in ("reload", "default")
+                                                    or args.profile):
+        parser.error("--live: for z20 light EFFECT, on the active profile, and z20 animate EFFECT | off")
+    if args.command == "animate":
+        if v and v[0] not in (*ANIMATIONS, "off", "reload", "saved"):
+            parser.error(f"animate: one of {', '.join(ANIMATIONS)}, or off, reload")
+        if v and v[0] in ANIMATIONS:
+            try:
+                check_animation(v[0], [c.lstrip("#") for c in v[1:]], args.cycle, args.brightness)
+            except Z20Error as e:
+                parser.error(str(e))
+        elif len(v) > 1:
+            parser.error(f"animate {v[0]} takes no more values")
+        if args.save and args.live or args.save and not (v and v[0] in ANIMATIONS) \
+                or args.live and not (v and (v[0] in ANIMATIONS or v[0] == "off")):
+            parser.error("animate: --save or --live, with an effect (--live also with off)")
     if args.command == "color" and v and v != ["off"] and (len(v) % 2 or not v):
         parser.error("color: LEDS COLOR pairs, like: color w,a,s,d ff0000 all 000000; or color off")
     if args.command == "light" and v and v not in (["reload"], ["default"]):
@@ -1404,9 +1877,29 @@ def main():
     if args.command == "restore" and len(v) != 1:
         parser.error("restore needs a backup directory")
 
+    if args.command == "presence" and v == ["settings"]:
+        s = presence_settings()
+        if args.json:
+            print(json.dumps(s))
+        else:
+            steps = lambda event: ", ".join(a["action"] + (f" after {a['after_s']:g} s" if a["after_s"] else "")
+                                            for a in s[event]) or "nothing"
+            print(f"{s['config']}{'' if s['exists'] else ' (not there: the defaults)'}:\n"
+                  f"  away for {s['leave_after_s']:g} s: {steps('leave')}\n"
+                  f"  back for {s['come_after_s']:g} s: {steps('come')}")
+        return 0
+    if args.command == "animate":
+        try:
+            state = animate_command(v, args)
+        except KeyboardInterrupt:
+            return 0
+        if not v or v[0] in ("off", "reload") or args.save or args.live:
+            print(json.dumps(state and {k: state[k] for k in ("effect", "colors", "cycle_ms", "brightness", "how")})
+                  if args.json else animation_text(state))
+        return 0
     if args.command in ("presence", "events"):
         if v:
-            parser.error(f"{args.command} takes no values")
+            parser.error(f"{args.command} takes no values" + (" but settings" if args.command == "presence" else ""))
         try:
             presence(args.dry_run) if args.command == "presence" else watch_events(args.json, args.wait)
         except KeyboardInterrupt:
@@ -1423,7 +1916,8 @@ def main():
                 print(f"EVGA {s['model']}, firmware {s['firmware']}: profile {s['profile']} \"{s['profile_name']}\", "
                       f"Game Mode {'on' if s['game_mode'] else 'off'} (blocks {', '.join(s['game_mode_blocks']) or 'nothing'}), "
                       f"{'NKRO' if s['nkro'] else '6KRO'}, {s['report_rate']} Hz")
-                print(f"lighting: {lighting_text(s['lighting'])}")
+                print(f"lighting: {lighting_text(s['lighting'])}"
+                      + (f"; over it: {animation_text(s['animation'])}" if s["animation"] else ""))
                 for label, key in s["keys"].items():
                     print(f"{label:7} {key['text']}")
                 if s["changed_keys"]:
@@ -1462,6 +1956,11 @@ def main():
                 print(json.dumps({"profile": n, "name": profile_name(p)}) if args.json
                       else f"profile {n}: \"{profile_name(p)}\"" + (f", now with profile {v[1]}'s settings"
                                                                         if v[0] == "copy" else ""))
+        elif args.command == "profile" and not v:
+            active = kb.profile_number()
+            ps = [{"profile": n, "name": profile_name(kb.read_profile(n)), "active": n == active} for n in range(1, 10)]
+            print(json.dumps(ps) if args.json else
+                  "\n".join(f"{'*' if p['active'] else ' '} {p['profile']}  {p['name']}" for p in ps))
         elif args.command == "profile":
             kb.set_profile(int(v[0]))
         elif args.command == "rate":

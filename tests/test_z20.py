@@ -513,5 +513,82 @@ class Lighting(unittest.TestCase):
         self.assertEqual(z20.lighting(q), {"effect": "off"})
 
 
+
+class Animate(unittest.TestCase):
+    def test_every_led_has_a_place(self):
+        for iso, missing in ((True, {57}), (False, {119, 120})):  # ANSI \\ or ISO # and \\
+            layout = z20.led_layout(iso)
+            self.assertEqual(set(z20.LED_NAMES) - set(layout), {116, 117, *missing})  # 116-117: scroll wheel
+            spots = sorted(layout.values())
+            for a, b in zip(spots, spots[1:]):
+                self.assertGreater(abs(a[0] - b[0]) + abs(a[1] - b[1]), 0.4, (a, b))
+        layout = z20.led_layout()
+        self.assertEqual(layout[z20.KEY_BY_NAME["esc"]], (1.75, 0.5))
+        self.assertEqual(layout[z20.KEY_BY_NAME["space"]], (1.25 + 3.75 + 3.125, 6))
+
+    def test_effects_give_colors_and_frames_the_keyboard_takes(self):
+        import random
+        layout = z20.led_layout()
+        for effect, (colors, most, cycle) in z20.ANIMATIONS.items():
+            colors_at = z20.animation(effect, [tuple(z20.parse_color(c)) for c in colors], cycle, layout,
+                                      random.Random(7))
+            lit = set()
+            for i in range(100):
+                frame = colors_at(i * z20.FRAME_S)
+                self.assertEqual(set(frame), set(layout), effect)
+                self.assertTrue(all(0 <= c <= 255 for color in frame.values() for c in color), effect)
+                lit |= {p for p, color in frame.items() if max(color) > 1}
+                z20.check_request(z20.color_report(z20.animation_frame(frame, 0xFF)))
+            self.assertGreater(len(lit), len(layout) // 3, effect)  # it moves across the keyboard
+
+    def test_blend(self):
+        red, blue = (255, 0, 0), (0, 0, 255)
+        self.assertEqual(z20.blend([red, blue], 0), red)
+        self.assertEqual(z20.blend([red, blue], 1), blue)
+        self.assertEqual(z20.blend([red, blue], 0.5), (127.5, 0, 127.5))
+        self.assertEqual(z20.blend([red, blue], 1, cyclic=True), red)
+        self.assertEqual(z20.blend([red, blue], 0.75, cyclic=True), (127.5, 0, 127.5))
+
+    def test_saved_settings_live_before_saved(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            config, live = os.path.join(d, "animation.ini"), os.path.join(d, "live.ini")
+            old = z20.ANIMATION_CONFIG, z20.ANIMATION_LIVE
+            z20.ANIMATION_CONFIG, z20.ANIMATION_LIVE = config, live
+            try:
+                self.assertIsNone(z20.saved_animation())
+                z20.write_animation(config, "fire", ["ff0000", "ffff00"], 900, None)
+                self.assertEqual(z20.saved_animation(), ("fire", ["ff0000", "ffff00"], 900, None, "saved"))
+                z20.write_animation(live, "gradient", ["00ff00"], None, 40)
+                self.assertEqual(z20.saved_animation(), ("gradient", ["00ff00"], None, 40, "live"))
+                with open(config, "w") as f:
+                    f.write("[animation]\neffect = lava\n")
+                os.remove(live)
+                with self.assertRaises(z20.Z20Error):
+                    z20.saved_animation()
+            finally:
+                z20.ANIMATION_CONFIG, z20.ANIMATION_LIVE = old
+
+    def test_checks(self):
+        z20.check_animation("rain", ["00ff00", "ffffff"], 1500, 80)
+        for effect, colors, cycle, brightness in (("lava", [], None, None), ("scanner", ["ff0000", "00ff00"], None, None),
+                                                  ("fire", ["red"], None, None), ("fire", [], 50, None),
+                                                  ("fire", [], None, 101)):
+            with self.assertRaises(z20.Z20Error, msg=effect):
+                z20.check_animation(effect, colors, cycle, brightness)
+
+    def test_state_of_a_process_that_ended(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            old = z20.ANIMATION_STATE
+            z20.ANIMATION_STATE = os.path.join(d, "animation.json")
+            try:
+                self.assertIsNone(z20.animation_state())
+                z20.save_json(z20.ANIMATION_STATE, {"pid": os.getpid(), "effect": "fire"})
+                self.assertIsNone(z20.animation_state())  # this process isn't a z20 animate
+            finally:
+                z20.ANIMATION_STATE = old
+
+
 if __name__ == "__main__":
     unittest.main()
