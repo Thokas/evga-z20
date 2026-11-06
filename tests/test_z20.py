@@ -259,7 +259,7 @@ class PresenceService(unittest.TestCase):
                 self.calls.append((argv[3], argv[-1]))
 
             def log(self, text):
-                self.logged.append(text.split("  ", 1)[1])
+                self.logged.append(text)
 
         desktop = Desktop()
         desktop.do("pause-media")
