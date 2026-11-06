@@ -34,6 +34,15 @@
                                         z20 color off; LEDS: w,a,s,d, e1, LeftBar1-9, RightBar1-9,
                                         Logo1-4, or all, keys, bars, logo. Later calls add to it.
   z20 color off
+  z20 sensor [--json]                   the presence sensor's settings and the distance now
+  z20 sensor watch [--json]             distance and presence as they change, and what the
+                                        keyboard reports, until Ctrl+C
+  z20 sensor on | off | distance CM     present: closer than CM (10-120)
+  z20 sensor come nothing|wake|unlock [S]           when someone comes (after 0-10 s)
+  z20 sensor leave nothing|dark|lock|sleep [S]      when they leave (after 10-999 s)
+  z20 sensor welcome fade|rows|explosion|raining|barber|lightbar|thunder [MS]
+                                        the effect when someone comes, and its length
+  z20 sensor ... --profile N            another profile than the active one
   z20 backup                            copy profiles 1-9 and the macros to ~/.local/state/z20/backups/
   z20 restore DIR [--profile N | --macro N]
                                         write profiles and macros back from a backup (all in DIR,
@@ -54,6 +63,7 @@ import glob
 import json
 import os
 import re
+import select
 import sys
 import time
 
@@ -93,7 +103,7 @@ P_ROWS = 1617
 
 EFFECTS = {"off": 0, "static": 1, "breathing": 2, "pulse": 3, "spiral": 4, "wave": 5, "stars": 6,
            "reactive": 7, "fade": 16, "rows": 17}
-EFFECT_NAMES = {**{v: k for k, v in EFFECTS.items()}, 18: "explosion", 19: "raining", 20: "hair salon",
+EFFECT_NAMES = {**{v: k for k, v in EFFECTS.items()}, 18: "explosion", 19: "raining", 20: "barber pole",
                 21: "light bar wave", 22: "thunder", 23: "recorded"}
 # Per effect: the byte after the main effect (Unleash writes the effect's direction or
 # sub mode there), its cycle time, and its colors (offset, count, bytes per color;
@@ -116,6 +126,17 @@ RAM_BLOCKS = {1: (0x0D, P_STATIC, 20), 2: (0x0E, P_BREATHING, 28), 3: (0x0F, P_P
 # Report 6: colors per LED, shown until stopped: 06 EA 02 <01 show / 00 stop> 00 00 00 <checksum>,
 # then brightness, red, green, blue for each of 196 LED positions (keys, light bars, logo).
 LED_COUNT = 196
+
+# The presence sensor (a distance sensor on top), part of each profile; 2-byte values
+# little-endian: on, distance (mm), come after (ms), come action, leave after (s, as far as
+# known), leave action, 4 gestures (not offered by Unleash), welcome effect and its length (ms).
+P_SENSOR = 152
+COME = {"nothing": 0xFFFF, "wake": 1, "unlock": 2}  # 0, "turn on", isn't offered by Unleash
+LEAVE = {"nothing": 0xFFFF, "sleep": 1, "lock": 2, "dark": 3}  # 0, "turn off", neither
+WELCOME = {"fade": 16, "rows": 17, "explosion": 18, "raining": 19, "barber": 20, "lightbar": 21, "thunder": 22}
+# Status reports on interface 1 (report 3): what changed on the keyboard itself.
+STATUS_EVENTS = {0: "profile", 1: "lighting effect", 2: "NKRO", 3: "Game Mode", 4: "reset to default",
+                 6: "key position"}
 
 E_KEYS = {"E1": 21, "E2": 43, "E3": 65, "E4": 82, "E5": 102}  # key positions
 
@@ -343,6 +364,11 @@ class Keyboard:
 
     def nkro(self):
         return bool(self.general(0x0F)[7])
+
+    def distance(self):
+        """What the presence sensor measures now, in mm."""
+        a = self.general(0x41)
+        return a[7] | a[8] << 8
 
     def read_profile(self, n):
         p = self.call(bytes([8, *HEADER, READ, n]), 0.02)
@@ -658,6 +684,104 @@ def set_lighting(p, effect, colors, brightness, cycle):
     return p
 
 
+def sensor_settings(p):
+    u16 = lambda o: p[P_SENSOR + o] | p[P_SENSOR + o + 1] << 8
+    name = lambda table, value, extra: {v: k for k, v in table.items()}.get(value, extra.get(value, str(value)))
+    return {"on": bool(p[P_SENSOR]), "distance_cm": u16(1) / 10,
+            "come": name(COME, u16(5), {0: "turn on"}), "come_after_s": u16(3) / 1000,
+            "leave": name(LEAVE, u16(9), {0: "turn off"}), "leave_after_s": u16(7),
+            "welcome": EFFECT_NAMES.get(p[P_SENSOR + 27], str(p[P_SENSOR + 27])), "welcome_ms": u16(29)}
+
+
+def sensor_text(s):
+    if not s["on"]:
+        return "presence sensor off"
+    come = f"come: {s['come']}" + (f" after {s['come_after_s']:g} s" if s["come_after_s"] else "")
+    return (f"present within {s['distance_cm']:g} cm; {come}, welcome {s['welcome']} {s['welcome_ms']} ms; "
+            f"leave: {s['leave']} after {s['leave_after_s']} s")
+
+
+def set_sensor(p, words):
+    """The profile with one sensor setting changed: on | off | distance CM | come ACTION [S] |
+    leave ACTION [S] | welcome EFFECT [MS]."""
+    p = bytearray(p)
+
+    def put(offset, value):
+        p[P_SENSOR + offset:P_SENSOR + offset + 2] = value.to_bytes(2, "little")
+
+    def number(text, low, high, what):
+        try:
+            value = float(text)
+        except ValueError:
+            value = low - 1
+        if not low <= value <= high:
+            raise Z20Error(f"{what}: {low:g} to {high:g}")
+        return value
+
+    what, rest = words[0], words[1:]
+    if what in ("on", "off") and not rest:
+        p[P_SENSOR] = int(what == "on")
+    elif what == "distance" and len(rest) == 1:
+        put(1, round(number(rest[0], 10, 120, "distance in cm") * 10))
+    elif what == "come" and 1 <= len(rest) <= 2 and rest[0] in COME:
+        put(5, COME[rest[0]])
+        if rest[1:]:
+            put(3, round(number(rest[1], 0, 10, "come after, seconds") * 1000))
+    elif what == "leave" and 1 <= len(rest) <= 2 and rest[0] in LEAVE:
+        put(9, LEAVE[rest[0]])
+        if rest[1:]:
+            put(7, round(number(rest[1], 10, 999, "leave after, seconds")))
+    elif what == "welcome" and 1 <= len(rest) <= 2 and rest[0] in WELCOME:
+        p[P_SENSOR + 27:P_SENSOR + 29] = bytes([WELCOME[rest[0]], 0])
+        if rest[1:]:
+            put(29, round(number(rest[1], 500, 30000, "welcome length, ms")))
+    else:
+        raise Z20Error("sensor: on | off | distance CM | come nothing|wake|unlock [S] | "
+                       "leave nothing|dark|lock|sleep [S] | welcome " + "|".join(WELCOME) + " [MS]")
+    return p
+
+
+def interface_event(data):
+    """Text for an input report on interface 1 (the sensor's actions may send some)."""
+    if data[:1] == b"\x03" and len(data) > 2:
+        what = STATUS_EVENTS.get(data[1], f"status 0x{data[1]:02x}")
+        return f"keyboard: {what} {data[2]}" + (f" ({data[2:].hex(' ')})" if any(data[3:]) else "")
+    if data[:1] == b"\x02" and len(data) > 2:
+        usage = data[1] | data[2] << 8
+        return "media key " + (CONSUMER.get(usage, f"0x{usage:03x}") if usage else "up")
+    return f"report {data.hex(' ')}"
+
+
+def watch_sensor(as_json):
+    """Print the distance and presence as they change, and what the keyboard sends on
+    interface 1, until Ctrl+C."""
+    path, _ = find_keyboard()
+    kb = Keyboard()
+    threshold = sensor_settings(kb.read_profile(kb.profile_number()))["distance_cm"] * 10
+    kb.close()
+    events = os.open(path, os.O_RDONLY | os.O_NONBLOCK)  # input reports; no lock needed to read them
+    last_shown, present = None, None
+    try:
+        while True:
+            kb = Keyboard()  # locked only while reading, so other z20 runs go on
+            d = kb.distance()
+            kb.close()
+            now = d < threshold
+            if now != present or last_shown is None or abs(d - last_shown) >= 50:
+                state = {"distance_mm": d, "present": now}
+                print(json.dumps(state) if as_json else f"{time.strftime('%H:%M:%S')}  {d:5d} mm  "
+                      f"{'present' if now else 'away'}", flush=True)
+                last_shown, present = d, now
+            while select.select([events], [], [], 0)[0]:
+                text = interface_event(os.read(events, 64))
+                print(json.dumps({"event": text}) if as_json else f"{time.strftime('%H:%M:%S')}  {text}", flush=True)
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        os.close(events)
+
+
 def with_ram_lighting(kb, p, effect):
     """The stored profile p with the lighting in RAM over it: the effect number and the
     settings of `effect` (a number), as far as the RAM has them."""
@@ -847,7 +971,7 @@ def restore(kb, directory, profile=None, macro=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("status", "macros", "macro", "profile", "game-mode", "key", "light",
-                                            "color", "backup", "restore"))
+                                            "color", "sensor", "backup", "restore"))
     parser.add_argument("values", nargs="*", help="see above")
     parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
     parser.add_argument("--macro", type=int, choices=MACRO_SLOTS, metavar="N", help="restore: only macro N")
@@ -1018,12 +1142,31 @@ def main():
                     print("per-key colors: off (the profile's lighting shows)")
                 for color, names in shown.items():
                     print(f"{color}  {', '.join(names)}")
+        elif args.command == "sensor" and v[:1] == ["watch"]:
+            kb.close()  # watch takes the keyboard only for each reading
+            kb = None
+            watch_sensor(args.json)
+        elif args.command == "sensor":
+            n = args.profile or kb.profile_number()
+            p = kb.read_profile(n)
+            if v:
+                p = set_sensor(p, v)
+                kb.write_profile(n, p)
+            s = {"profile": n, **sensor_settings(p)}
+            if n == kb.profile_number():
+                s["distance_mm"] = kb.distance()
+            if args.json:
+                print(json.dumps(s))
+            elif not v or sys.stdout.isatty():
+                print(f"profile {n}: {sensor_text(s)}" +
+                      (f"; now {s['distance_mm']} mm" if "distance_mm" in s else ""))
         elif args.command == "backup":
             print(backup(kb))
         elif args.command == "restore":
             print("restored " + ", ".join(restore(kb, os.path.expanduser(v[0]), args.profile, args.macro)))
     finally:
-        kb.close()
+        if kb:
+            kb.close()
     return 0
 
 

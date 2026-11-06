@@ -16,6 +16,8 @@ hidraw.
   combination, media key, click, profile); back to the factory setting one
   by one or all at once
 - **Macros:** list them step by step; create, edit, rename and delete them
+- **Presence sensor:** its settings per profile (distance, what happens when
+  you come and go, welcome effect) and the live distance
 - **JSON output** for widgets and scripts
 
 Before every change it saves what it replaces, and after the write it reads
@@ -69,6 +71,13 @@ z20 light reload                      back to the stored lighting
 z20 color all 000000 w,a,s,d ff0000   colors per LED over the lighting (later calls add);
                                       also e1, LeftBar1-9, RightBar1-9, Logo1-4, keys, bars, logo
 z20 color off                         back to the profile's lighting
+z20 sensor [--json]                   presence sensor settings and the distance now
+z20 sensor watch                      distance, present / away and keyboard events, live
+z20 sensor on | off | distance 45     present: closer than 45 cm (10-120)
+z20 sensor leave dark 30              when you leave, after 30 s: dark, lock, sleep, nothing
+z20 sensor come wake 1                when you come, after 1 s: wake, unlock, nothing
+z20 sensor welcome thunder 3000       effect when you come (fade, rows, explosion, raining,
+                                      barber, lightbar, thunder) and its length in ms
 z20 backup                            profiles 1-9 and macros to ~/.local/state/z20/backups/
 z20 restore DIR [--profile N | --macro N]
                                       write profiles and macros back from a backup
@@ -125,6 +134,18 @@ given, as Unleash does): steps without one would merge, and a key pressed and
 let go in the same instant never shows. Add longer waits for programs that
 miss fast input. The run mode (once, N times, toggled, held) belongs to the
 key: `z20 key E4 macro 5 --repeat 3`.
+
+The presence sensor on top of the keyboard measures the distance to what is
+in front of it. Each profile says within which distance someone counts as
+present, what the keyboard does a few seconds after you leave (the lighting
+goes dark, by default) and when you come back (a welcome effect). The
+factory distance, 120 cm, can be too far: a chair half a metre away keeps
+the keyboard "occupied". `z20 sensor watch` shows what the sensor measures
+while you sit, lean back and walk away; set the distance between your
+sitting and your empty-desk values (`z20 sensor distance 45`). The keyboard
+reports nothing to the computer when you come or go; `watch` reads the
+distance twice a second. The lock, sleep, wake and unlock actions are meant
+for Windows and haven't been tried on Linux: sleep may suspend the computer.
 
 To use E1-E5 as desktop shortcuts, give them keys no keyboard has, like
 `z20 key E4 key f14`, and bind those in the desktop's shortcut settings.
@@ -188,8 +209,8 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 
 ## Not done yet
 
-- The presence sensor: its settings are known (PROTOCOL.md) and the live
-  distance can be read, but `z20` doesn't show or change them yet.
+- What the presence sensor's lock, sleep, wake and unlock actions send, and
+  its 4 gesture slots.
 - The brightness set with Fn + Up / Down: where the keyboard keeps it isn't
   known yet.
 

@@ -103,7 +103,13 @@ same for lighting and checks the result by reading the profile back.
 ### Presence sensor
 
 Bytes 152-182 of a profile; 2-byte values little-endian. From Unleash's
-code and the profiles read; what the actions do hasn't been tried.
+code and the profiles read. Checked: with the distance at 450 mm and
+"leave: dark" after 10, the lighting went dark about 12 s after leaving (so
+the leave time is in seconds), and the welcome effect played on coming
+back; the keyboard sent no report on interface 1 either time. The lock,
+sleep, wake and unlock actions haven't been tried. Unleash's sliders: 10-120
+cm, come after 0-10 s, leave after 10-999 s; it offers come: nothing, wake
+up, unlock, and leave: nothing, sleep, lock, dark.
 
 | Bytes | Content | Profile 1 here |
 | ----- | ------- | -------------- |
@@ -111,14 +117,21 @@ code and the profiles read; what the actions do hasn't been tried.
 | 153-154 | distance that counts as present, mm (Unleash shows cm) | 1200 |
 | 155-156 | time before "approaching" acts, ms | 0 |
 | 157-158 | when approaching: 0 turn on, 1 wake up, 2 unlock, `FFFF` nothing | nothing |
-| 159-160 | time before "leaving" acts (unit not known yet) | 10 |
+| 159-160 | time before "leaving" acts, s | 10 |
 | 161-162 | when leaving: 0 turn off, 1 sleep, 2 lock, 3 dark, `FFFF` nothing | dark |
 | 163-178 | 4 gestures, each a key function | disabled |
 | 179-180 | welcome effect when approaching (effect number, sub mode) | 22, 0 |
 | 181-182 | welcome effect's length, ms | 5000 |
 
-The current distance: `04 EA 02 41 01`, answer bytes 7-8, mm (checked: 424
-with someone at the desk).
+The current distance: `04 EA 02 41 01`, answer bytes 7-8, mm. Checked over
+a few minutes: 240-430 at the desk, 0.5-1.3 m with the chair pushed back,
+around 0.5 m with the chair in place, under 100 with a hand over the
+sensor. Unleash polls it for its live display.
+
+The status report on interface 1 (report 3) tells what changed on the
+keyboard itself: `03 <what> <value>`, what = 0 profile, 1 lighting effect,
+2 6KRO / NKRO, 3 Game Mode (`03 03 01` on), 4 reset to default, 6 key
+position.
 
 ### Key functions
 

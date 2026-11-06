@@ -140,6 +140,36 @@ class LiveLighting(unittest.TestCase):
             self.assertEqual(end, start)
 
 
+class Sensor(unittest.TestCase):
+    def test_settings_as_profile_1_has_them(self):
+        p = profile(1)
+        p[152:183] = bytes.fromhex("01b0040000ffff0a000300ff001e00ff001f00ff002000ff0021001600881300"[:62])
+        self.assertEqual(z20.sensor_settings(p), {
+            "on": True, "distance_cm": 120.0, "come": "nothing", "come_after_s": 0.0, "leave": "dark",
+            "leave_after_s": 10, "welcome": "thunder", "welcome_ms": 5000})
+
+    def test_changes_touch_only_the_sensor(self):
+        p = profile(1)
+        q = p
+        for words in (["distance", "45"], ["leave", "lock", "30"], ["come", "wake", "2"],
+                      ["welcome", "rows", "3000"], ["off"]):
+            q = z20.set_sensor(q, words)
+        self.assertEqual({i for i in range(len(p)) if p[i] != q[i]} - set(range(152, 183)), set())
+        s = z20.sensor_settings(q)
+        self.assertEqual((s["on"], s["distance_cm"], s["leave"], s["leave_after_s"], s["come"], s["come_after_s"],
+                          s["welcome"], s["welcome_ms"]), (False, 45.0, "lock", 30, "wake", 2.0, "rows", 3000))
+
+    def test_out_of_range(self):
+        for words in (["distance", "5"], ["distance", "200"], ["leave", "fly"], ["leave", "dark", "5"],
+                      ["come", "wake", "11"], ["welcome", "nosuch"], ["on", "now"], ["distance"]):
+            with self.assertRaises(z20.Z20Error, msg=words):
+                z20.set_sensor(profile(1), words)
+
+    def test_interface_events(self):
+        self.assertEqual(z20.interface_event(bytes([3, 3, 1, 0, 0, 0])), "keyboard: Game Mode 1")
+        self.assertEqual(z20.interface_event(bytes([2, 0xCD, 0])), "media key PlayPause")
+
+
 class Answers(unittest.TestCase):
     def test_answer_must_belong_to_the_read(self):
         ask = report(8, 0xEA, 0x02, z20.READ, 1)
