@@ -144,8 +144,10 @@ the keyboard "occupied". `z20 sensor watch` shows what the sensor measures
 while you sit, lean back and walk away; set the distance between your
 sitting and your empty-desk values (`z20 sensor distance 45`). The keyboard
 reports nothing to the computer when you come or go; `watch` reads the
-distance twice a second. The lock, sleep, wake and unlock actions are meant
-for Windows and haven't been tried on Linux: sleep may suspend the computer.
+distance twice a second. `leave lock` works on KDE: the keyboard types
+Win+L, which KDE takes as Meta+L and locks the screen. The sleep, wake and
+unlock actions are meant for Windows and haven't been tried on Linux: sleep
+may suspend the computer.
 
 To use E1-E5 as desktop shortcuts, give them keys no keyboard has, like
 `z20 key E4 key f14`, and bind those in the desktop's shortcut settings.
@@ -202,15 +204,18 @@ The keyboard's configuration interface takes commands as HID feature
 reports and answers each in the same report, read back right after. A
 profile (name, key functions, lighting) is one 1806-byte report; `z20`
 changes a profile the way Unleash does: read it, change only the bytes that
-matter, write it back with a new checksum, then tell the keyboard to reload
-it. The details are in [PROTOCOL.md](PROTOCOL.md).
+matter, write it back with a new checksum. For the active profile it then
+puts the changed parts into the keyboard's RAM (lighting blocks, sensor
+settings, single keys), so they work at once without a reload: a reload
+restarts the lighting effect, and one set to start on a key press would
+stay dark until then. The details are in [PROTOCOL.md](PROTOCOL.md).
 
 Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 
 ## Not done yet
 
-- What the presence sensor's lock, sleep, wake and unlock actions send, and
-  its 4 gesture slots.
+- What the presence sensor's sleep, wake and unlock actions send, and its 4
+  gesture slots.
 - The brightness set with Fn + Up / Down: where the keyboard keeps it isn't
   known yet.
 

@@ -51,6 +51,10 @@ class Requests(unittest.TestCase):
             z20.check_request(report(4, 0xEA, 0x02, command, z20.READ))
         for command in (0x06, 0x08, 0x0B):
             z20.check_request(report(4, 0xEA, 0x02, command, z20.WRITE))
+        z20.check_request(report(4, 0xEA, 0x02, 0x07, z20.WRITE, 1, 0, 45, 0, 0, 0x6B, 0))  # Fn+Q in RAM
+        for layer, pos in ((2, 45), (0, 108), (0, 121), (0, 17)):  # no layer 2, not Fn, no such keys
+            with self.assertRaises(z20.Z20Error):
+                z20.check_request(report(4, 0xEA, 0x02, 0x07, z20.WRITE, layer, 0, pos))
         with self.assertRaises(z20.Z20Error):
             z20.check_request(report(4, 0xEA, 0x02, 0x0F, z20.WRITE))  # 6KRO/NKRO: read only
         with self.assertRaises(z20.Z20Error):
@@ -128,8 +132,11 @@ class LiveLighting(unittest.TestCase):
             z20.check_request(ram(block, z20.WRITE, b"\x05\x02"))
         bad = ram(0x0C, z20.WRITE, b"\x05\x02")
         bad[7] ^= 1
-        # 03-0A: the presence sensor, 0B: key functions, 00/01: Unleash's sync previews
-        for r in (bad, ram(0x03, z20.READ), ram(0x0B, z20.WRITE), ram(0x01, z20.WRITE), ram(0x16, z20.READ)):
+        for block in range(0x03, 0x0B):  # the presence sensor
+            z20.check_request(ram(block, z20.WRITE, b"\x01"))
+        # 0B: key functions, 00/01: Unleash's sync previews, 02 and 16: unknown
+        for r in (bad, ram(0x0B, z20.WRITE), ram(0x0B, z20.READ), ram(0x01, z20.WRITE), ram(0x02, z20.READ),
+                  ram(0x16, z20.READ)):
             with self.assertRaises(z20.Z20Error):
                 z20.check_request(r)
 
@@ -138,6 +145,44 @@ class LiveLighting(unittest.TestCase):
         ends = sorted((at, at + size) for _, at, size in z20.RAM_BLOCKS.values())
         for (_, end), (start, _) in zip(ends, ends[1:]):
             self.assertEqual(end, start)
+
+
+class RamUpdate(unittest.TestCase):
+    class Keyboard(z20.Keyboard):
+        """Records what update_ram sends; RAM reads give zeros, key reads what was written."""
+        def __init__(self):
+            self.sent, self.keys = [], {}
+
+        def read_ram(self, block):
+            return bytes(128)
+
+        def write_ram(self, block, data):
+            self.sent.append(("ram", block, bytes(data[:2])))
+
+        def call(self, request, wait):
+            r = bytearray(request).ljust(17, b"\0")
+            z20.check_request(r)
+            if r[4] == z20.WRITE:
+                self.keys[r[5], r[7]] = bytes(r[8:12])
+                self.sent.append(("key", r[5], r[7]))
+            return bytes(8) + self.keys.get((r[5], r[7]), bytes(4))
+
+    def test_parts_go_to_ram(self):
+        old = profile(1)
+        new = z20.set_sensor(z20.set_lighting(old, "static", [b"\x00\x00\xff"], None, None), ["leave", "lock"])
+        new[z20.P_FN_KEYS + 45 * 4:z20.P_FN_KEYS + 46 * 4] = b"\x00\x00\x6b\x00"
+        kb = self.Keyboard()
+        self.assertTrue(kb.update_ram(old, new))
+        self.assertEqual(kb.sent, [("ram", 0x0C, b"\x01\x00"), ("ram", 0x0D, bytes(new[z20.P_STATIC:z20.P_STATIC + 2])),
+                                   ("ram", 0x08, b"\x02\x00"), ("key", 1, 45)])
+
+    def test_other_changes_need_a_reload(self):
+        old = profile(1)
+        new = bytearray(old)
+        new[10] ^= 1  # the name
+        kb = self.Keyboard()
+        self.assertFalse(kb.update_ram(old, new))
+        self.assertEqual(kb.sent, [])
 
 
 class Sensor(unittest.TestCase):

@@ -64,7 +64,7 @@ what the answer carries.
 | ------- | ------------------------- | ----- |
 | `01` firmware version | bytes 7, 8: minor, major (`26 01` = 1.38); sub 1 `00` asks the bootloader's | reads |
 | `06` active profile | 1-9 | reads, writes |
-| `07` key function in RAM | sub 2 = layer (0 normal, 1 Fn), byte 7 = key position, bytes 8-11 = function | (reads) |
+| `07` key function in RAM | sub 2 = layer (0 normal, 1 Fn), byte 7 = key position, bytes 8-11 = function; write: the same with sub 1 `00` (in Unleash's code, unused there; checked) | reads, writes |
 | `08` reload the active profile | write after changing it with report 8 | writes |
 | `0B` Game Mode ("E key mode") | 0 off, 1 on | reads, writes |
 | `0C` keys blocked in Game Mode (RAM) | bit mask, see below | |
@@ -83,8 +83,13 @@ Shift, 0x20 menu key, 0x40 Windows key.
 Request: `08 EA 02 01 <n>` (read profile n, 1-9; 254 is the factory default).
 To change one, read it, change bytes, set byte 3 to `00` (write), recompute
 the checksum and send the whole report; then send `04 EA 02 08 00` (reload) if
-it is the active profile. That is how Unleash assigns keys; `z20` does the
-same for lighting and checks the result by reading the profile back.
+it is the active profile. That is how Unleash assigns keys. The reload
+restarts the lighting effect, and an effect set to start on a key press then
+stays dark until a key is pressed. So `z20` writes the profile and puts the
+changed parts into RAM instead: report 7 blocks for lighting and sensor,
+`04 EA 02 07 00 <layer> 00 <key> <function>` for single keys (checked: the
+wave kept running, and each part reads back as written). It reloads only
+for changes without a RAM part, like a whole restored profile.
 
 | Bytes | Content |
 | ----- | ------- |
@@ -106,8 +111,14 @@ Bytes 152-182 of a profile; 2-byte values little-endian. From Unleash's
 code and the profiles read. Checked: with the distance at 450 mm and
 "leave: dark" after 10, the lighting went dark about 12 s after leaving (so
 the leave time is in seconds), and the welcome effect played on coming
-back; the keyboard sent no report on interface 1 either time. The lock,
-sleep, wake and unlock actions haven't been tried. Unleash's sliders: 10-120
+back; the keyboard sent no report on interface 1 either time. "Leave:
+lock" locked KDE about 10 s after leaving, again with nothing on interface
+1: the keyboard types Win+L on its keyboard interfaces, which KDE takes as
+Meta+L. The sleep, wake and unlock actions haven't been tried. The sensor
+settings are also in RAM, report 7 blocks `03` on, `04` distance, `05`
+come time, `06` come action, `07` leave time, `08` leave action, `09`
+welcome effect, `0A` welcome length, each the profile's value padded with
+zeros (checked: all eight equal). Unleash's sliders: 10-120
 cm, come after 0-10 s, leave after 10-999 s; it offers come: nothing, wake
 up, unlock, and leave: nothing, sleep, lock, dark.
 
@@ -238,7 +249,9 @@ to the right), where the stored profile may have `FF`.
 
 Blocks `03`-`0A` hold the presence sensor's settings (on, distance,
 approach time and action, leave time and action, welcome effect) and `0B`
-key functions; Unleash writes those, then saves.
+key functions; Unleash writes those, then saves. `z20` writes `03`-`0A` too,
+after writing a profile, and leaves `0B` alone (single keys go through
+report 4 command `07`).
 
 Report 7 with `00` or `01` in byte 3 is something else: Unleash's "sync"
 previews, which run an effect without touching the profile until
