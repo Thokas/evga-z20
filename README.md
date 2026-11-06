@@ -9,16 +9,17 @@ hidraw.
   stars, reactive and more, with color, brightness and speed
 - **Profiles and Game Mode:** switch profiles 1–9, turn Game Mode on or off
 - **Backup and restore** of all nine profiles and the stored macros
-- **Readout** of what the macro keys E1–E5 do, and of every stored macro
-  step by step
+- **Macro keys E1–E5:** see and change what they do (a stored macro once,
+  N times, toggled or held; a key combination, media key, click, profile)
+- **Readout** of every stored macro, step by step
 - **JSON output** for widgets and scripts
 
 Before every change it saves the old profile, and after the write it reads
 the profile back to check it. It never sends firmware, reset or
 factory-reset commands. [PROTOCOL.md](PROTOCOL.md) documents the
 configuration protocol, which was worked out from Unleash RGB for
-interoperability. Tested on a Z20 Elite ISO (firmware 1.38). Writing macros
-and per-key colors are not done yet.
+interoperability. Tested on a Z20 Elite ISO (firmware 1.38). Creating and
+editing macros and per-key colors are not done yet.
 
 ## Keyboards
 
@@ -40,6 +41,13 @@ z20 status [--json]                   profile, Game Mode, lighting, E1-E5, macro
 z20 macros [--json]                   stored macros, step by step
 z20 profile N                         switch to profile 1-9 (also Fn + 1-9)
 z20 game-mode on | off | toggle
+z20 key E4                            what macro key E4 does
+z20 key E4 macro 2                    run macro 2 once (z20 macros lists them)
+z20 key E4 macro 2 --repeat 3 | --toggle | --hold
+                                      3 times, until E4 is pressed again, while E4 is held
+z20 key E4 key ctrl+shift+t           or: media playpause, click left, wheel up,
+                                      profile 2, off, default (factory setting)
+z20 key ... --fn | --profile N        the key's Fn layer, another profile
 z20 light [--json]                    lighting of the active profile
 z20 light off
 z20 light static ff8000               one color (rrggbb or #rrggbb)
@@ -70,6 +78,11 @@ and keeps settings for every effect, so `z20 light wave` switches back to the
 wave as it was set up (in Unleash or with the keyboard's Fn keys). `--json`
 output is meant for widgets and scripts.
 
+To use E1-E5 as desktop shortcuts, give them keys no keyboard has, like
+`z20 key E4 key f14`, and bind those in the desktop's shortcut settings.
+F13-F18 are free; avoid F20-F23, which X keyboard maps turn into mic mute
+and touchpad on / off / toggle.
+
 ## Install
 
 ```
@@ -94,8 +107,24 @@ root-only.
 - Before a profile is written, the profile as it was goes to
   `~/.local/state/z20/previous/`; afterwards it is read back and compared.
   `z20 restore ~/.local/state/z20/previous` undoes the last change.
-- Macros and key assignments are only read so far.
+- Macros are only read so far; `z20 key` changes only the key you name.
 - The firmware is never touched; leave updates to Unleash RGB.
+- Backups and `previous/` are readable by you only: macros can hold
+  anything that was typed while recording them.
+- One `z20` at a time: a second one (say, a widget polling while you change
+  the lighting) waits, and every answer is checked to belong to its request.
+
+What the udev rule allows: any program running as you in your desktop
+session can send the keyboard's configuration interface anything, including
+the commands `z20` refuses. It can change lighting, keys and macros, put the
+keyboard into its bootloader or erase its firmware (Unleash RGB on Windows
+can flash it again). It cannot flash new firmware, because the bootloader
+appears as another USB device that the rule doesn't open. Changed keys and
+macros stay in the keyboard, also on other computers, so check with
+`z20 status` if something types on its own. Chrome and other Chromium
+browsers can reach the interface through WebHID, but only after you pick the
+keyboard in the browser's device chooser: don't allow a website "EVGA Z20".
+Without the rule, `z20` works only as root.
 
 ## How it works
 
@@ -110,8 +139,8 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 
 ## Not done yet
 
-- Writing macros and putting them on keys (the format is known, see
-  PROTOCOL.md).
+- Writing macros (creating and editing them; the format is known, see
+  PROTOCOL.md), and `z20 key` for keys other than E1-E5.
 - Colors per key and live effects; [OpenRGB](https://openrgb.org) already
   does those for the Z20.
 - The brightness set with Fn + Up / Down: where the keyboard keeps it isn't

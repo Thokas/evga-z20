@@ -5,6 +5,13 @@
   z20 macros [--json]                   stored macros with what they do
   z20 profile N                         switch to profile 1-9
   z20 game-mode on | off | toggle
+  z20 key E1-E5 [--json]                what the macro key does
+  z20 key E1-E5 macro N [--toggle | --hold | --repeat N]
+                                        run macro N (see z20 macros) once, N times, until the
+                                        key is pressed again or while it is held
+  z20 key E1-E5 key ctrl+c | media playpause | click left | wheel up | profile 2 | off | default
+  z20 key ... --fn                      the key's Fn layer
+  z20 key ... --profile N               another profile than the active one
   z20 light [--json]                    lighting of the active profile
   z20 light off | static COLOR | breathing COLOR [COLOR]
   z20 light wave | spiral | pulse | stars | reactive | fade | rows
@@ -92,7 +99,8 @@ HID_KEYS = {**{4 + i: chr(ord("A") + i) for i in range(26)},
             71: "ScrollLock", 72: "Pause", 73: "Insert", 74: "Home", 75: "PageUp", 76: "Delete",
             77: "End", 78: "PageDown", 79: "Right", 80: "Left", 81: "Down", 82: "Up", 83: "NumLock",
             84: "KP/", 85: "KP*", 86: "KP-", 87: "KP+", 88: "KPEnter",
-            **{89 + i: f"KP{i + 1}" for i in range(9)}, 98: "KP0", 99: "KP.", 100: "ISO\\", 101: "Menu"}
+            **{89 + i: f"KP{i + 1}" for i in range(9)}, 98: "KP0", 99: "KP.", 100: "ISO\\", 101: "Menu",
+            **{0x68 + i: f"F{13 + i}" for i in range(12)}}  # F13-F24: free for desktop shortcuts
 MODIFIERS = ["LCtrl", "LShift", "LAlt", "LGUI", "RCtrl", "RShift", "RAlt", "RGUI"]
 CONSUMER = {0xE9: "VolumeUp", 0xEA: "VolumeDown", 0xE2: "Mute", 0xCD: "PlayPause",
             0xB5: "NextTrack", 0xB6: "PrevTrack", 0xB7: "Stop"}
@@ -104,6 +112,16 @@ RUN_MODES = {0: "loop, on release", 1: "once, on release", 2: "multi-stage, on r
 FUNCTIONS = {4: "Fn", 5: "Game Mode", 7: "left click", 8: "right click", 9: "middle click",
              11: "info report", **{17 + i: f"profile {i + 1}" for i in range(9)},
              30: "next profile", 31: "previous profile", 255: "disabled"}
+DEFAULT_PROFILE = 254  # the factory settings, only read
+
+# Names `z20 key` takes, in lower case.
+KEY_USAGES = {**{name.lower(): usage for usage, name in HID_KEYS.items()},
+              "escape": 41, "return": 40, "del": 76, "ins": 73, "pgup": 75, "pgdn": 78}
+MODIFIER_BITS = {"ctrl": 0x01, "lctrl": 0x01, "shift": 0x02, "lshift": 0x02, "alt": 0x04, "lalt": 0x04,
+                 "super": 0x08, "meta": 0x08, "win": 0x08, "lgui": 0x08, "rctrl": 0x10, "rshift": 0x20,
+                 "ralt": 0x40, "altgr": 0x40, "rsuper": 0x80, "rgui": 0x80}
+MEDIA = {**{name.lower(): usage for usage, name in CONSUMER.items()},
+         "next": 0xB5, "previous": 0xB6, "prev": 0xB6, "volume-up": 0xE9, "volume-down": 0xEA}
 
 
 class Z20Error(Exception):
@@ -149,6 +167,17 @@ def check_request(r):
         raise Z20Error(f"refusing to send {bytes(r[:8]).hex(' ')}")
 
 
+def check_answer(report, answer):
+    """The keyboard has one answer per report ID: make sure this one is to our request."""
+    if answer[1:3] != HEADER or answer[6] != SUCCESS:
+        raise Z20Error(f"the keyboard refused {bytes(report[:8]).hex(' ')}: {bytes(answer[:8]).hex(' ')}")
+    # A read's answer repeats bytes 3-4: command and READ (report 4), or READ and the
+    # profile or macro number. Writes are checked by reading back.
+    is_read = report[4] == READ if report[0] == 4 else report[3] == READ
+    if is_read and answer[3:5] != report[3:5]:
+        raise Z20Error(f"answer to another request: {bytes(answer[:8]).hex(' ')} for {bytes(report[:8]).hex(' ')}")
+
+
 class Keyboard:
     def __init__(self):
         path, self.model = find_keyboard()
@@ -156,6 +185,9 @@ class Keyboard:
             self.fd = os.open(path, os.O_RDWR)
         except PermissionError:
             raise Z20Error(f"no access to {path}: install udev/70-evga-z20.rules") from None
+        # One z20 at a time (a widget may poll while a command runs): the keyboard keeps a
+        # single answer per report, which a second request in between would replace.
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
 
     def close(self):
         os.close(self.fd)
@@ -164,14 +196,16 @@ class Keyboard:
         """Send a feature report, wait for the keyboard and return its answer in that report."""
         report = bytearray(request).ljust(SIZES[request[0]], b"\0")
         check_request(report)
-        # A mutable buffer: an immutable one is copied into 1024 bytes, too few for reports 8 and 9.
-        fcntl.ioctl(self.fd, ioc(0x06, len(report)), report, True)  # HIDIOCSFEATURE
-        time.sleep(wait)
         answer = bytearray(len(report))
         answer[0] = report[0]
-        fcntl.ioctl(self.fd, ioc(0x07, len(answer)), answer, True)  # HIDIOCGFEATURE
-        if answer[1:3] != HEADER or answer[6] != SUCCESS:
-            raise Z20Error(f"the keyboard refused {bytes(report[:8]).hex(' ')}: {bytes(answer[:8]).hex(' ')}")
+        try:
+            # A mutable buffer: an immutable one is copied into 1024 bytes, too few for reports 8 and 9.
+            fcntl.ioctl(self.fd, ioc(0x06, len(report)), report, True)  # HIDIOCSFEATURE
+            time.sleep(wait)
+            fcntl.ioctl(self.fd, ioc(0x07, len(answer)), answer, True)  # HIDIOCGFEATURE
+        except OSError as e:
+            raise Z20Error(f"keyboard: {e.strerror} (unplugged?)") from None
+        check_answer(report, answer)
         return bytes(answer)
 
     def general(self, command, sub=READ, value=0, wait=0.005):
@@ -234,9 +268,15 @@ class Keyboard:
 
 
 def save(directory, reports):
-    os.makedirs(directory, exist_ok=True)
+    """Only for the user: macros can hold anything that was typed while recording them."""
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    for d in (STATE, os.path.dirname(directory), directory):
+        if d.startswith(STATE):
+            os.chmod(d, 0o700)
     for name, data in reports.items():
-        with open(os.path.join(directory, f"{name}.bin"), "wb") as f:
+        path = os.path.join(directory, f"{name}.bin")
+        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as f:
+            os.fchmod(f.fileno(), 0o600)
             f.write(data)
 
 
@@ -255,13 +295,48 @@ def key_function(b, macro_names):
         return f"media {CONSUMER.get(usage, f'0x{usage:03x}')}", {"function": "media", "usage": usage}
     if func == 3:
         name = macro_names.get(p1, "")
-        text = f"macro {p1}" + (f' "{name}"' if name else "") + (f" ({RUN_MODES.get(p2, p2)})" if p2 else "")
-        return text, {"function": "macro", "macro": p1, "name": name, "run": RUN_MODES.get(p2, p2)}
+        # parameter 3 of mode 11 (Unleash's "repeat") counts the runs after the first
+        run = f"{p3 + 1} times" if p2 == 11 else RUN_MODES.get(p2, f"run mode {p2}")
+        text = f"macro {p1}" + (f' "{name}"' if name else "") + f" ({run})"
+        return text, {"function": "macro", "macro": p1, "name": name, "run": run}
     if func == 6:
         text = "wheel " + ("up" if p1 == 0 else "down")
         return text, {"function": "wheel", "text": text}
     text = FUNCTIONS.get(func, f"function {func} ({p1} {p2} {p3})")
     return text, {"function": text}
+
+
+def parse_function(words, macro_slots, run):
+    """The 4-byte key function for `z20 key KEY WORDS`; run is (mode, count) for a macro."""
+    what, rest = words[0], words[1:]
+    one = rest[0].lower() if len(rest) == 1 else None
+    if what == "macro":
+        if not (one and one.isdigit() and int(one) in macro_slots):
+            raise Z20Error(f"no macro {' '.join(rest)} on the keyboard (z20 macros lists them)")
+        return bytes([3, int(one), *run])
+    if what == "key" and one:
+        mods, keys = 0, []
+        for part in one.split("+"):
+            if part in MODIFIER_BITS:
+                mods |= MODIFIER_BITS[part]
+            elif part in KEY_USAGES:
+                keys.append(KEY_USAGES[part])
+            else:
+                raise Z20Error(f"unknown key: {part}")
+        if len(keys) > 2:
+            raise Z20Error("key: modifiers and at most two keys, like ctrl+shift+t")
+        return bytes([0, mods, *(keys + [0, 0])[:2]])
+    if what == "media" and one in MEDIA:
+        return bytes([2, MEDIA[one] & 0xFF, MEDIA[one] >> 8, 0])
+    if what == "click" and one in ("left", "right", "middle"):
+        return bytes([{"left": 7, "right": 8, "middle": 9}[one], 0, 0, 0])
+    if what == "wheel" and one in ("up", "down"):
+        return bytes([6, int(one == "down"), 0, 0])
+    if what == "profile" and one and re.fullmatch(r"[1-9]|next|previous", one):
+        return bytes([30 if one == "next" else 31 if one == "previous" else 16 + int(one), 0, 0, 0])
+    if what == "off" and not rest:
+        return bytes([0xFF, 0, 0, 0])  # as Unleash writes "disabled"
+    raise Z20Error(f"unknown key function: {' '.join(words)}")
 
 
 def macro_actions(data):
@@ -401,13 +476,18 @@ def restore(kb, directory, only):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("status", "macros", "profile", "game-mode", "light", "backup", "restore"))
+    parser.add_argument("command", choices=("status", "macros", "profile", "game-mode", "key", "light", "backup", "restore"))
     parser.add_argument("values", nargs="*", help="see above")
     parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
+    run = parser.add_mutually_exclusive_group()
+    run.add_argument("--toggle", action="store_true", help="key macro: run until the key is pressed again")
+    run.add_argument("--hold", action="store_true", help="key macro: run while the key is held")
+    run.add_argument("--repeat", type=int, choices=range(1, 256), metavar="N", help="key macro: run N times")
+    parser.add_argument("--fn", action="store_true", help="key: its Fn layer")
     parser.add_argument("--brightness", type=int, choices=range(0, 101), metavar="P", help="percent")
     parser.add_argument("--cycle", type=int, metavar="MS", help="effect cycle in milliseconds")
     parser.add_argument("--json", action="store_true", help="print as JSON")
-    args = parser.parse_args()
+    args = parser.parse_intermixed_args()  # options may also stand between the values
     v = args.values
     if args.command == "profile" and (len(v) != 1 or not re.fullmatch(r"[1-9]", v[0])):
         parser.error("profile needs a number 1-9")
@@ -420,6 +500,11 @@ def main():
         if not wanted[0] <= len(v) - 1 <= wanted[1]:
             parser.error(f"light {v[0]}: " + (f"needs {'one or two colors' if v[0] == 'breathing' else 'a color'}"
                                               if wanted[0] else "takes no colors"))
+    if args.command == "key":
+        if not v or v[0].upper() not in E_KEYS:
+            parser.error("key: E1, E2, E3, E4 or E5")
+        if (args.toggle or args.hold or args.repeat) and v[1:2] != ["macro"]:
+            parser.error("--toggle, --hold and --repeat are for macros")
     if args.command == "restore" and len(v) != 1:
         parser.error("restore needs a backup directory")
 
@@ -453,6 +538,29 @@ def main():
             if args.json or sys.stdout.isatty():
                 on = kb.game_mode()
                 print(json.dumps({"game_mode": on}) if args.json else f"Game Mode {'on' if on else 'off'}")
+        elif args.command == "key":
+            n = args.profile or kb.profile_number()
+            label = ("Fn+" if args.fn else "") + v[0].upper()
+            at = (P_FN_KEYS if args.fn else P_KEYS) + E_KEYS[v[0].upper()] * 4
+            p = kb.read_profile(n)
+            if len(v) > 1:
+                if v[1:] == ["default"]:
+                    function = kb.read_profile(DEFAULT_PROFILE)[at:at + 4]
+                else:
+                    # once: mode 9; N times: mode 11, which runs once more than its count
+                    times = args.repeat or 1
+                    run = (8, 0) if args.toggle else (12, 0) if args.hold else (9, 0) if times == 1 else (11, times - 1)
+                    function = parse_function(v[1:], kb.macro_slots() if v[1] == "macro" else [], run)
+                p = bytearray(p)
+                p[at:at + 4] = function
+                kb.write_profile(n, p)
+            b = p[at:at + 4]
+            names = {b[1]: kb.macro_name(b[1])} if b[0] == 3 and b[1] in kb.macro_slots() else {}
+            text, info = key_function(b, names)
+            if args.json:
+                print(json.dumps({"profile": n, "key": label, "text": text, **info}))
+            elif len(v) == 1 or sys.stdout.isatty():
+                print(f"profile {n}: {label} {text}")
         elif args.command == "light":
             n = args.profile or kb.profile_number()
             p = kb.read_profile(n)

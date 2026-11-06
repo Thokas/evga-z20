@@ -72,7 +72,7 @@ what the answer carries.
 | `11`, `1B` report rate | 0 4000 Hz, 1 2000, 2 1000, 3 8000 | |
 | `12` save RAM to the profile | profile number, 0 = active | |
 | `22` flash layout | | |
-| `30` Fn key off, `33` key position reports, `34` external flash, `41`-`44` distance sensor | | |
+| `30` Fn key off, `33` key position reports (from Unleash's code: write 1 and the keyboard reports the position of pressed keys on interface 1), `34` external flash, `41`-`44` distance sensor | | |
 | `02` reset, `03` **erase firmware**, `04` **enter bootloader**, `09` reset profile, `31` **factory reset** | | never |
 
 Game Mode blocks (bits): 1 Alt+Tab, 2 Tab, 4 Ctrl+Esc, 8 Alt+F4, 0x10 left
@@ -113,11 +113,27 @@ same for lighting and checks the result by reading the profile back.
 | `06` wheel | 0 up, 1 down |
 | `07`, `08`, `09` | left, right, middle click |
 | `11`-`19` | profile 1-9; `1E`, `1F` next / previous profile |
-| `FF` | disabled |
+| `FF` | disabled (`FF 00 00 00`, as Unleash writes it and the factory profile has it) |
 
 Macro run modes: `00` loop, `01` once, `02` multi-stage, `03` repeat, each
-started on key release; `08`-`0B` the same started on key press (`08`:
-pressing again stops the loop, checked); `04` two-phase; `0C` while held.
+started on key release; `08`-`0B` the same started on key press; `04`
+two-phase; `0C` while held. Unleash offers three of them for a key: `0B`
+with a count (repeat N times), `08` (loop until the key is pressed again)
+and `0C` (while held). Checked on the keyboard:
+
+- `08`: a press starts the loop, the next press stops it.
+- `09`: runs once.
+- `0B`: runs count + 1 times. Unleash writes its "repeat" number unchanged,
+  so its default 1 means two runs.
+- `0C`: runs again and again while the key is held, and stops as soon as it
+  is let go, also in the middle of the macro, releasing the keys it held.
+
+The Fn layer (bytes 748-1231) is what Fn + the key does. Key functions take
+HID usages up to `FF`, so F13-F24 (`68`-`73`) work: Fn + E4 set to `00 00 69 00`
+sends F14.
+
+The factory profile (254) has E1-E5 disabled; for the other keys both
+layers hold the key itself (the Fn layer of W is W).
 
 Key positions: 0 Game Mode key, 1 Esc, 2-13 F1-F12, 14 Print, 15 Scroll Lock,
 16 Pause, 18-20 media previous / play / next, **21 E1**, 22 `` ` ``, 23-32 1-0,

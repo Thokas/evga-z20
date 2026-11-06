@@ -78,6 +78,23 @@ class Requests(unittest.TestCase):
             z20.check_request(report(9, 0xEA, 0x02, z20.WRITE, 3, 0, z20.FAIL))
 
 
+class Answers(unittest.TestCase):
+    def test_answer_must_belong_to_the_read(self):
+        ask = report(8, 0xEA, 0x02, z20.READ, 1)
+        z20.check_answer(ask, report(8, 0xEA, 0x02, z20.READ, 1, 0, z20.SUCCESS))
+        with self.assertRaises(z20.Z20Error):  # another process asked for profile 2 in between
+            z20.check_answer(ask, report(8, 0xEA, 0x02, z20.READ, 2, 0, z20.SUCCESS))
+        ask = report(4, 0xEA, 0x02, 0x06, z20.READ)
+        with self.assertRaises(z20.Z20Error):  # the answer to a Game Mode read
+            z20.check_answer(ask, report(4, 0xEA, 0x02, 0x0B, z20.READ, 0, z20.SUCCESS))
+
+    def test_refused_and_written(self):
+        ask = report(4, 0xEA, 0x02, 0x0B, z20.WRITE, 0, 0, 1)
+        z20.check_answer(ask, report(4, 0xEA, 0x02, 0x0B, z20.WRITE, 0, z20.SUCCESS, 1))
+        with self.assertRaises(z20.Z20Error):
+            z20.check_answer(ask, report(4, 0xEA, 0x02, 0x0B, z20.WRITE, 0, z20.FAIL, 1))
+
+
 class Reports(unittest.TestCase):
     def test_checksum_makes_the_sum_zero(self):
         p = profile()
@@ -98,6 +115,31 @@ class Reports(unittest.TestCase):
         self.assertEqual(z20.key_function(bytes([2, 0xCD, 0, 0]), names)[0], "media PlayPause")
         self.assertEqual(z20.key_function(bytes([7, 0, 0, 0]), names)[0], "left click")
         self.assertEqual(z20.key_function(bytes([0xFF] * 4), names)[0], "disabled")
+
+    def test_macro_run_modes(self):
+        # checked on the keyboard: mode 11 with count 1 runs twice, with count 3 four times
+        self.assertEqual(z20.key_function(bytes([3, 2, 11, 1]), {})[0], "macro 2 (2 times)")
+        self.assertEqual(z20.key_function(bytes([3, 2, 11, 3]), {})[0], "macro 2 (4 times)")
+        self.assertEqual(z20.key_function(bytes([3, 2, 9, 0]), {})[0], "macro 2 (once)")
+        self.assertEqual(z20.key_function(bytes([3, 2, 12, 0]), {})[0], "macro 2 (while held)")
+
+    def test_key_functions_from_words(self):
+        parse = z20.parse_function
+        self.assertEqual(parse(["macro", "2"], [1, 2], (11, 1)), bytes([3, 2, 11, 1]))
+        self.assertEqual(parse(["macro", "2"], [2], (8, 0)), bytes([3, 2, 8, 0]))
+        self.assertEqual(parse(["key", "ctrl+shift+t"], [], None), bytes([0, 0x03, 0x17, 0]))
+        self.assertEqual(parse(["key", "F5"], [], None), bytes([0, 0, 0x3E, 0]))
+        self.assertEqual(parse(["key", "super"], [], None), bytes([0, 0x08, 0, 0]))
+        self.assertEqual(parse(["media", "playpause"], [], None), bytes([2, 0xCD, 0, 0]))
+        self.assertEqual(parse(["click", "right"], [], None), bytes([8, 0, 0, 0]))
+        self.assertEqual(parse(["wheel", "down"], [], None), bytes([6, 1, 0, 0]))
+        self.assertEqual(parse(["profile", "3"], [], None), bytes([19, 0, 0, 0]))
+        self.assertEqual(parse(["profile", "next"], [], None), bytes([30, 0, 0, 0]))
+        self.assertEqual(parse(["off"], [], None), bytes([0xFF, 0, 0, 0]))
+        for words, slots in ((["macro", "7"], [1, 2]), (["macro"], [1]), (["key", "ctrl+nosuchkey"], []),
+                             (["key", "a+b+c"], []), (["media", "loud"], []), (["off", "now"], [])):
+            with self.assertRaises(z20.Z20Error, msg=words):
+                parse(words, slots, (11, 1))
 
     def test_profile_name(self):
         p = profile()
