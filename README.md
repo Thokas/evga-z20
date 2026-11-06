@@ -59,6 +59,11 @@ z20 macro new Hi "LShift down, H, LShift up, I"
                                       store a macro in a free slot (prints its number)
 z20 macro edit 5 "ctrl down, c, ctrl up" | rename 5 Copy | delete 5
 z20 profile N                         switch to profile 1-9 (also Fn + 1-9)
+z20 profile rename 2 Games | copy 1 2 rename a profile; copy profile 1's settings into 2
+z20 rate [1000 | 2000 | 4000]         report rate (Hz) of the active profile
+z20 nkro on | off                     n-key rollover, or 6 keys at a time
+z20 game-mode keys win,alt-tab        the keys Game Mode blocks (also menu, lshift, alt-f4,
+                                      ctrl-esc, tab; none)
 z20 game-mode on | off | toggle
 z20 key E4                            what macro key E4 does (or capslock, f1, a, game ...)
 z20 key E4 macro 2                    run macro 2 once (z20 macros lists them)
@@ -79,6 +84,7 @@ z20 light ... --brightness P          percent, for the effect's colors
 z20 light ... --cycle MS              length of one effect cycle (speed)
 z20 light static 0000ff --live        only in RAM: until reload, profile switch, unplugging
 z20 light reload                      back to the stored lighting
+z20 light default | sensor default    back to the factory setting
 z20 color all 000000 w,a,s,d ff0000   colors per LED over the lighting (later calls add);
                                       also e1, LeftBar1-9, RightBar1-9, Logo1-4, keys, bars, logo
 z20 color off                         back to the profile's lighting
@@ -89,6 +95,8 @@ z20 sensor leave dark 30              when you leave, after 30 s: dark, lock, sl
 z20 sensor come wake 1                when you come, after 1 s: wake, unlock, nothing
 z20 sensor welcome thunder 3000       effect when you come (fade, rows, explosion, raining,
                                       barber, lightbar, thunder) and its length in ms
+z20 events [--json]                   what the keyboard reports itself (profile, effect and
+                                      Game Mode changed with its keys, media keys)
 z20 presence [--dry-run]              lock, pause media, screen off ... when you leave
                                       (a service, see Presence service)
 z20 backup                            profiles 1-9 and macros to ~/.local/state/z20/backups/

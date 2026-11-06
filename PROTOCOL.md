@@ -76,7 +76,18 @@ what the answer carries.
 | `02` reset, `03` **erase firmware**, `04` **enter bootloader**, `09` reset profile, `31` **factory reset** | | never |
 
 Game Mode blocks (bits): 1 Alt+Tab, 2 Tab, 4 Ctrl+Esc, 8 Alt+F4, 0x10 left
-Shift, 0x20 menu key, 0x40 Windows key.
+Shift, 0x20 menu key, 0x40 Windows key. The profile (byte 136) and command
+`0C` keep them inverted: a set bit lets the key through (`BF`: only the
+Windows key blocked). Unleash writes byte 136 and the report rate (byte 137)
+into the active profile, then reloads; `z20` sends `0C` and the rate command
+below instead (checked, both read back as written).
+
+The report rate has a command of its own in report 7: `07 EA 02 1B <00 set /
+01 read / 02 default> 00 00 <checksum> <rate>`, checksum the negated rate,
+rate 0 4000, 1 2000, 2 1000 Hz (3, 8000, isn't offered for the Z20). OpenRGB
+sends `07 EA 02 1B 00 00 00 FE 02` as a "sleep timer": that sets 1000 Hz.
+
+6KRO / NKRO: `04 EA 02 0F 00 00 00 <0 or 1>` (checked).
 
 ## Report 8: a profile
 

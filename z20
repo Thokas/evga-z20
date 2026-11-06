@@ -9,7 +9,12 @@
                                         STEPS as z20 macros prints them; a key, "left click"
                                         or media key alone is pressed and let go
   z20 profile N                         switch to profile 1-9
+  z20 profile rename N NAME | copy N M  rename a profile; copy N's settings into M (M keeps its name)
+  z20 rate [1000 | 2000 | 4000]         report rate (Hz) of the active profile
+  z20 nkro on | off                     n-key rollover, or 6 keys at a time
   z20 game-mode on | off | toggle
+  z20 game-mode keys [win,menu,lshift,alt-tab,alt-f4,ctrl-esc,tab | none]
+                                        the keys Game Mode blocks (in the active profile)
   z20 key KEY [--json]                  what a key does (e1-e5, capslock, f1, a, comma, game ...;
                                         named as on a US keyboard)
   z20 key KEY macro N [--toggle | --hold | --repeat N]
@@ -29,6 +34,7 @@
   z20 light ... --live                  only in RAM: shown at once, never written to flash, gone
                                         with z20 light reload, a profile switch or unplugging
   z20 light reload                      back to the lighting the profile has stored
+  z20 light default                     lighting back to the factory setting
   z20 color LEDS COLOR [LEDS COLOR ...] [--brightness P]
                                         colors per LED, shown over the profile's lighting until
                                         z20 color off; LEDS: w,a,s,d, e1, LeftBar1-9, RightBar1-9,
@@ -38,6 +44,7 @@
   z20 sensor watch [--json]             distance and presence as they change, and what the
                                         keyboard reports, until Ctrl+C
   z20 sensor on | off | distance CM     present: closer than CM (10-120)
+  z20 sensor default                    the sensor back to the factory setting
   z20 sensor come nothing|wake|unlock [S]           when someone comes (after 0-10 s)
   z20 sensor leave nothing|dark|lock|sleep [S]      when they leave (after 10-999 s)
   z20 sensor welcome fade|rows|explosion|raining|barber|lightbar|thunder [MS]
@@ -46,6 +53,8 @@
   z20 presence [--dry-run]              act on the desktop when you leave and come back
                                         (settings: ~/.config/z20/presence.ini; runs until stopped,
                                         as the systemd user service z20-presence)
+  z20 events [--json]                   what the keyboard reports on its own: profile, effect and
+                                        Game Mode changed with its keys, media keys (until Ctrl+C)
   z20 backup                            copy profiles 1-9 and the macros to ~/.local/state/z20/backups/
   z20 restore DIR [--profile N | --macro N]
                                         write profiles and macros back from a backup (all in DIR,
@@ -90,11 +99,16 @@ FAIL = 0xC1
 # firmware also knows reset (02), erase firmware (03), bootloader (04), reset
 # profile (09) and factory reset (31): those never go out.
 GENERAL = {0x01: "firmware version", 0x06: "profile", 0x07: "key function", 0x08: "reload profile",
+           0x0C: "keys Game Mode blocks (RAM)",
            0x0B: "Game Mode", 0x0F: "6KRO/NKRO", 0x41: "distance (presence sensor)"}
-GENERAL_WRITES = {0x06, 0x07, 0x08, 0x0B}  # 07: a key function in RAM
+GENERAL_WRITES = {0x06, 0x07, 0x08, 0x0B, 0x0C, 0x0F}  # 07: a key function in RAM, 0C: Game Mode keys
 
 # Report 8, one profile: offsets into the report (byte 0 is the report ID).
 P_NAME_LEN, P_NAME = 8, 10  # length in UTF-16 characters, then the name
+P_GAME_KEYS, P_RATE = 136, 137  # keys Game Mode blocks (their bits inverted), report rate
+RATES = {4000: 0, 2000: 1, 1000: 2}  # what Unleash offers for the Z20 (3 would be 8000)
+GAME_KEYS = {"alt-tab": 0x01, "tab": 0x02, "ctrl-esc": 0x04, "alt-f4": 0x08, "lshift": 0x10, "menu": 0x20,
+             "win": 0x40}
 P_KEYS, P_FN_KEYS = 264, 748  # 121 key functions of 4 bytes, by key position
 P_EFFECT = 1288
 P_STATIC = 1320  # each effect: zone, start mode, stop mode, ..., then its own fields
@@ -261,10 +275,14 @@ def check_request(r):
         ok = ok and r[3] in GENERAL and (r[4] == READ or r[3] in GENERAL_WRITES)
         if r[3] == 0x07 and r[4] == WRITE:  # a key function in RAM: a layer, a key, not Fn
             ok = ok and r[5] in (0, 1) and r[7] in KEY_POSITIONS and r[7] != FN
+        if r[3] == 0x0F and r[4] == WRITE:  # 6KRO (0) or NKRO (1)
+            ok = ok and r[7] in (0, 1)
     elif rid == 8:
         ok = ok and (r[3] == READ or (r[3] == WRITE and 1 <= r[4] <= 9 and r[7] == checksum(r)))
     elif rid == 6:  # colors per LED: show them (with the checksum) or stop
         ok = ok and r[3] in (0, 1) and r[4:7] == b"\0\0\0" and r[7] == checksum(r)
+    elif rid == 7 and r[3] == 0x1B:  # report rate: read (01), read the default (02), set (00)
+        ok = ok and r[5] == 0 and (r[4] in (READ, 2) or r[4] == WRITE and r[8] in RATES.values() and r[7] == checksum(r))
     elif rid == 7:  # the active profile's lighting in RAM; the sensor (03-0A) and keys (0B) stay closed
         ok = (ok and RAM_EFFECT <= r[3] <= max(b for b, _, _ in RAM_BLOCKS.values()) and r[5] == 0
               and (r[4] == READ or r[4] == WRITE and r[7] == checksum(r)))
@@ -375,6 +393,9 @@ class Keyboard:
     def nkro(self):
         return bool(self.general(0x0F)[7])
 
+    def set_nkro(self, on):
+        self.general(0x0F, WRITE, int(on), wait=0.1)
+
     def distance(self):
         """What the presence sensor measures now, in mm."""
         a = self.general(0x41)
@@ -417,6 +438,7 @@ class Keyboard:
         keys = [(layer, pos, base + pos * 4) for layer, base in ((0, P_KEYS), (1, P_FN_KEYS)) for pos in range(121)]
         covered = {i for _, at, size in parts for i in range(at, at + size)}
         covered |= {i for _, _, at in keys for i in range(at, at + 4)}
+        covered |= set(range(P_NAME_LEN, P_NAME + 126)) | {P_GAME_KEYS, P_RATE}  # the name needs nothing
         changed_keys = [(layer, pos, at) for layer, pos, at in keys if old[at:at + 4] != new[at:at + 4]]
         if any(old[i] != new[i] for i in range(8, len(new)) if i not in covered) or \
                 any(pos not in KEY_POSITIONS or pos == FN for _, pos, _ in changed_keys):
@@ -432,6 +454,18 @@ class Keyboard:
             self.call(bytes([4, *HEADER, 0x07, WRITE, layer, 0, pos, *new[at:at + 4]]), 0.005)
             if self.call(bytes([4, *HEADER, 0x07, READ, layer, 0, pos]), 0.005)[8:12] != new[at:at + 4]:
                 raise Z20Error(f"key {KEY_POSITIONS[pos]} reads back different in RAM; z20 light reload")
+        if old[P_GAME_KEYS] != new[P_GAME_KEYS]:  # in RAM as in the profile, inverted
+            self.call(bytes([4, *HEADER, 0x0C, WRITE, 0, 0, new[P_GAME_KEYS]]), 0.005)
+            if self.call(bytes([4, *HEADER, 0x0C, READ]), 0.005)[7] != new[P_GAME_KEYS]:
+                raise Z20Error("the keys Game Mode blocks read back different in RAM; z20 light reload")
+        if old[P_RATE] != new[P_RATE]:  # report 7 command 1B, as Unleash sets it
+            report = bytearray(SIZES[7])
+            report[:7] = bytes([7, *HEADER, 0x1B, WRITE, 0, 0])
+            report[8] = new[P_RATE]
+            report[7] = checksum(report)
+            self.call(report, 0.005)
+            if self.call(bytes([7, *HEADER, 0x1B, READ]), 0.005)[8] != new[P_RATE]:
+                raise Z20Error("the report rate reads back different; z20 light reload")
         return True
 
     def macro_slots(self):
@@ -1074,6 +1108,83 @@ def colors_shown(frame):
     return out
 
 
+# Parts of a profile that "default" takes from the factory profile (offset, size): the effect
+# and the effects Unleash's own lighting reset copies (static to stars), and the sensor.
+FACTORY_LIGHTING = [(P_EFFECT, 2), (P_STATIC, P_FADE - P_STATIC)]
+FACTORY_SENSOR = [(P_SENSOR, 31)]
+
+
+def from_factory(p, factory, parts):
+    p = bytearray(p)
+    for at, size in parts:
+        p[at:at + size] = factory[at:at + size]
+    return p
+
+
+def rate_hz(p):
+    return {v: k for k, v in RATES.items()}.get(p[P_RATE], 8000 if p[P_RATE] == 3 else None)
+
+
+def game_keys(p):
+    """The keys Game Mode blocks; the profile keeps their bits inverted, as Unleash writes them."""
+    return [name for name, bit in GAME_KEYS.items() if ~p[P_GAME_KEYS] & bit]
+
+
+def set_game_keys(p, names):
+    p = bytearray(p)
+    p[P_GAME_KEYS] = ~sum(GAME_KEYS[n] for n in set(names)) & 0xFF
+    return p
+
+
+def set_profile_name(p, name):
+    raw = name.encode("utf-16-le")
+    if not name or len(raw) > 126:
+        raise Z20Error("profile name: 1 to 63 characters")
+    p = bytearray(p)
+    p[P_NAME_LEN:P_NAME_LEN + 2] = (len(raw) // 2).to_bytes(2, "little")
+    p[P_NAME:P_NAME + 126] = raw + b"\xff" * (126 - len(raw))  # padded as the profiles have it
+    return p
+
+
+def keyboard_event(data):
+    """An input report from interface 1 as a dict; None for the mouse reports macros send."""
+    if data[:1] == b"\x01":
+        return None
+    if data[:1] == b"\x03" and len(data) > 2:
+        return {"event": STATUS_EVENTS.get(data[1], f"status 0x{data[1]:02x}"), "value": data[2]}
+    if data[:1] == b"\x02" and len(data) > 2:
+        usage = data[1] | data[2] << 8
+        return {"event": "media key", "key": CONSUMER.get(usage, f"0x{usage:03x}") if usage else "up"}
+    return {"event": "report", "data": data.hex(" ")}
+
+
+def watch_events(as_json):
+    """Print what the keyboard reports on interface 1 until Ctrl+C; waits while it is unplugged.
+    Only reads input reports, so it needs no lock and sends nothing."""
+    trouble = None
+    while True:
+        try:
+            fd = os.open(find_keyboard()[0], os.O_RDONLY)
+        except (Z20Error, OSError) as e:
+            if str(e) != trouble:
+                print(f"waiting for the keyboard: {e}", file=sys.stderr, flush=True)
+                trouble = str(e)
+            time.sleep(2)
+            continue
+        trouble = None
+        try:
+            while True:
+                data = os.read(fd, 64)
+                event = keyboard_event(data)
+                if event:
+                    print(json.dumps(event) if as_json else f"{time.strftime('%H:%M:%S')}  {interface_event(data)}",
+                          flush=True)
+        except OSError:
+            pass  # unplugged: wait for it again
+        finally:
+            os.close(fd)
+
+
 def profile_name(p):
     length = p[P_NAME_LEN] | p[P_NAME_LEN + 1] << 8
     return p[P_NAME:P_NAME + min(2 * length, 126)].decode("utf-16-le", "replace")
@@ -1095,7 +1206,8 @@ def status(kb):
         text, info = key_function(b, names)
         changed[label] = {"text": text, **info}
     return {"model": kb.model, "firmware": kb.firmware(), "profile": n, "profile_name": profile_name(p),
-            "game_mode": kb.game_mode(), "nkro": kb.nkro(), "lighting": lighting(p),
+            "game_mode": kb.game_mode(), "game_mode_blocks": game_keys(p), "nkro": kb.nkro(),
+            "report_rate": rate_hz(p), "lighting": lighting(p),
             "keys": keys, "changed_keys": changed, "macros": {str(m): name for m, name in names.items()}}
 
 
@@ -1191,8 +1303,9 @@ def restore(kb, directory, profile=None, macro=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("status", "macros", "macro", "profile", "game-mode", "key", "light",
-                                            "color", "sensor", "presence", "backup", "restore"))
+    parser.add_argument("command", choices=("status", "macros", "macro", "profile", "rate", "nkro", "game-mode",
+                                            "key", "light", "color", "sensor", "presence", "events", "backup",
+                                            "restore"))
     parser.add_argument("values", nargs="*", help="see above")
     parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
     parser.add_argument("--macro", type=int, choices=MACRO_SLOTS, metavar="N", help="restore: only macro N")
@@ -1208,17 +1321,30 @@ def main():
     parser.add_argument("--json", action="store_true", help="print as JSON")
     args = parser.parse_intermixed_args()  # options may also stand between the values
     v = args.values
-    if args.command == "profile" and (len(v) != 1 or not re.fullmatch(r"[1-9]", v[0])):
-        parser.error("profile needs a number 1-9")
-    if args.command == "game-mode" and (len(v) != 1 or v[0] not in ("on", "off", "toggle")):
-        parser.error("game-mode needs on, off or toggle")
-    if args.live and (args.command != "light" or not v or v == ["reload"] or args.profile):
+    number = lambda s: re.fullmatch(r"[1-9]", s) is not None
+    if args.command == "profile" and not (len(v) == 1 and number(v[0]) or
+                                          len(v) == 3 and v[0] == "rename" and number(v[1]) or
+                                          len(v) == 3 and v[0] == "copy" and number(v[1]) and number(v[2])
+                                          and v[1] != v[2]):
+        parser.error("profile N | profile rename N NAME | profile copy N M (1-9)")
+    if args.command == "game-mode":
+        if v[:1] == ["keys"]:
+            names = [n for part in v[1:] for n in part.lower().split(",") if n]
+            if names != ["none"] and any(n not in GAME_KEYS for n in names):
+                parser.error(f"game-mode keys: {', '.join(GAME_KEYS)}, or none")
+        elif len(v) != 1 or v[0] not in ("on", "off", "toggle"):
+            parser.error("game-mode needs on, off, toggle, or keys")
+    if args.command == "rate" and (len(v) > 1 or v and not (v[0].isdigit() and int(v[0]) in RATES)):
+        parser.error("rate: 1000, 2000 or 4000")
+    if args.command == "nkro" and (len(v) != 1 or v[0] not in ("on", "off")):
+        parser.error("nkro: on or off")
+    if args.live and (args.command != "light" or not v or v[0] in ("reload", "default") or args.profile):
         parser.error("--live: for z20 light EFFECT, on the active profile")
     if args.command == "color" and v and v != ["off"] and (len(v) % 2 or not v):
         parser.error("color: LEDS COLOR pairs, like: color w,a,s,d ff0000 all 000000; or color off")
-    if args.command == "light" and v and v != ["reload"]:
+    if args.command == "light" and v and v not in (["reload"], ["default"]):
         if v[0] not in EFFECTS:
-            parser.error(f"light: one of {', '.join(EFFECTS)}, or reload")
+            parser.error(f"light: one of {', '.join(EFFECTS)}, or reload, default")
         wanted = {"static": (1, 1), "breathing": (1, 2)}.get(v[0], (0, 0))
         if not wanted[0] <= len(v) - 1 <= wanted[1]:
             parser.error(f"light {v[0]}: " + (f"needs {'one or two colors' if v[0] == 'breathing' else 'a color'}"
@@ -1242,11 +1368,11 @@ def main():
     if args.command == "restore" and len(v) != 1:
         parser.error("restore needs a backup directory")
 
-    if args.command == "presence":
+    if args.command in ("presence", "events"):
         if v:
-            parser.error("presence takes no values (settings: " + PRESENCE_CONFIG + ")")
+            parser.error(f"{args.command} takes no values")
         try:
-            presence(args.dry_run)
+            presence(args.dry_run) if args.command == "presence" else watch_events(args.json)
         except KeyboardInterrupt:
             pass
         return 0
@@ -1259,7 +1385,8 @@ def main():
                 print(json.dumps(s))
             else:
                 print(f"EVGA {s['model']}, firmware {s['firmware']}: profile {s['profile']} \"{s['profile_name']}\", "
-                      f"Game Mode {'on' if s['game_mode'] else 'off'}, {'NKRO' if s['nkro'] else '6KRO'}")
+                      f"Game Mode {'on' if s['game_mode'] else 'off'} (blocks {', '.join(s['game_mode_blocks']) or 'nothing'}), "
+                      f"{'NKRO' if s['nkro'] else '6KRO'}, {s['report_rate']} Hz")
                 print(f"lighting: {lighting_text(s['lighting'])}")
                 for label, key in s["keys"].items():
                     print(f"{label:7} {key['text']}")
@@ -1287,8 +1414,46 @@ def main():
                 steps = macro_actions(data)
                 print(json.dumps({"macro": n, "name": name, "actions": steps}) if args.json
                       else f"macro {n} \"{name}\": {', '.join(steps)}")
+        elif args.command == "profile" and v[0] in ("rename", "copy"):
+            n = int(v[1]) if v[0] == "rename" else int(v[2])
+            if v[0] == "rename":
+                p = set_profile_name(kb.read_profile(n), v[2])
+            else:  # all of N, but M keeps its name
+                p = bytearray(kb.read_profile(int(v[1])))
+                p[P_NAME_LEN:P_NAME + 126] = kb.read_profile(n)[P_NAME_LEN:P_NAME + 126]
+            kb.write_profile(n, p)
+            if args.json or sys.stdout.isatty():
+                print(json.dumps({"profile": n, "name": profile_name(p)}) if args.json
+                      else f"profile {n}: \"{profile_name(p)}\"" + (f", now with profile {v[1]}'s settings"
+                                                                        if v[0] == "copy" else ""))
         elif args.command == "profile":
             kb.set_profile(int(v[0]))
+        elif args.command == "rate":
+            n = args.profile or kb.profile_number()
+            p = kb.read_profile(n)
+            if v:
+                p = bytearray(p)
+                p[P_RATE] = RATES[int(v[0])]
+                kb.write_profile(n, p)
+            if args.json or not v or sys.stdout.isatty():
+                print(json.dumps({"profile": n, "report_rate": rate_hz(p)}) if args.json
+                      else f"profile {n}: {rate_hz(p)} Hz")
+        elif args.command == "nkro":
+            kb.set_nkro(v[0] == "on")
+            if args.json or sys.stdout.isatty():
+                on = kb.nkro()
+                print(json.dumps({"nkro": on}) if args.json else "NKRO" if on else "6KRO")
+        elif args.command == "game-mode" and v[0] == "keys":
+            n = args.profile or kb.profile_number()
+            p = kb.read_profile(n)
+            if v[1:]:
+                names = [x for part in v[1:] for x in part.lower().split(",") if x]
+                p = set_game_keys(p, [] if names == ["none"] else names)
+                kb.write_profile(n, p)
+            if args.json or len(v) == 1 or sys.stdout.isatty():
+                blocked = game_keys(p)
+                print(json.dumps({"profile": n, "game_mode_blocks": blocked}) if args.json
+                      else f"profile {n}: Game Mode blocks {', '.join(blocked) or 'nothing'}")
         elif args.command == "game-mode":
             kb.set_game_mode(not kb.game_mode() if v[0] == "toggle" else v[0] == "on")
             if args.json or sys.stdout.isatty():
@@ -1330,7 +1495,11 @@ def main():
                 kb.general(0x08, WRITE, wait=0.1)  # RAM from flash: the stored lighting again
             p = kb.read_profile(n)
             stored = lighting(p)
-            if v and v != ["reload"]:
+            if v == ["default"]:
+                p = from_factory(p, kb.read_profile(DEFAULT_PROFILE), FACTORY_LIGHTING)
+                kb.write_profile(n, p)
+                stored = lighting(p)
+            elif v and v != ["reload"]:
                 colors = [parse_color(c) for c in v[1:]]
                 if v[0] == "breathing" and len(colors) == 1:
                     colors.append(b"\0\0\0")  # breathe out to dark
@@ -1381,7 +1550,8 @@ def main():
             n = args.profile or kb.profile_number()
             p = kb.read_profile(n)
             if v:
-                p = set_sensor(p, v)
+                p = from_factory(p, kb.read_profile(DEFAULT_PROFILE), FACTORY_SENSOR) if v == ["default"] \
+                    else set_sensor(p, v)
                 kb.write_profile(n, p)
             s = {"profile": n, **sensor_settings(p)}
             if n == kb.profile_number():

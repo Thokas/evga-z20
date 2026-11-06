@@ -46,17 +46,17 @@ class Requests(unittest.TestCase):
             with self.assertRaises(z20.Z20Error):
                 z20.check_request(report(rid, 0xEA, 0x02, z20.READ, size=size))
 
-    def test_general_reads_and_the_three_writes(self):
+    def test_general_reads_and_writes(self):
         for command in (0x01, 0x06, 0x07, 0x0B, 0x0F):
             z20.check_request(report(4, 0xEA, 0x02, command, z20.READ))
-        for command in (0x06, 0x08, 0x0B):
+        for command in (0x06, 0x08, 0x0B, 0x0C):
             z20.check_request(report(4, 0xEA, 0x02, command, z20.WRITE))
         z20.check_request(report(4, 0xEA, 0x02, 0x07, z20.WRITE, 1, 0, 45, 0, 0, 0x6B, 0))  # Fn+Q in RAM
         for layer, pos in ((2, 45), (0, 108), (0, 121), (0, 17)):  # no layer 2, not Fn, no such keys
             with self.assertRaises(z20.Z20Error):
                 z20.check_request(report(4, 0xEA, 0x02, 0x07, z20.WRITE, layer, 0, pos))
         with self.assertRaises(z20.Z20Error):
-            z20.check_request(report(4, 0xEA, 0x02, 0x0F, z20.WRITE))  # 6KRO/NKRO: read only
+            z20.check_request(report(4, 0xEA, 0x02, 0x41, z20.WRITE))  # the sensor's distance: read only
         with self.assertRaises(z20.Z20Error):
             z20.check_request(report(4, 0x00, 0x02, 0x01, z20.READ))  # wrong header
 
@@ -159,14 +159,20 @@ class RamUpdate(unittest.TestCase):
             self.sent.append(("ram", block, bytes(data[:2])))
 
         def call(self, request, wait):
-            r = bytearray(request).ljust(17, b"\0")
+            r = bytearray(request).ljust(z20.SIZES[request[0]], b"\0")
             z20.check_request(r)
-            if r[3] == 0x12:
-                self.sent.append(("save",))
-            elif r[4] == z20.WRITE:
-                self.keys[r[5], r[7]] = bytes(r[8:12])
-                self.sent.append(("key", r[5], r[7]))
-            return bytes(8) + self.keys.get((r[5], r[7]), bytes(4))
+            what = {(4, 0x07): "key", (4, 0x0C): "game keys", (7, 0x1B): "rate"}[r[0], r[3]]
+            value = {"key": lambda: bytes(r[8:12]), "game keys": lambda: r[7], "rate": lambda: r[8]}[what]
+            if r[4] == z20.WRITE:
+                self.keys[what, r[5], r[7] if what == "key" else 0] = value()
+                self.sent.append((what, r[5], r[7]) if what == "key" else (what, value()))
+            stored = self.keys.get((what, r[5], r[7] if what == "key" else 0))
+            answer = bytearray(64)
+            if what == "key":
+                answer[8:12] = stored or bytes(4)
+            else:
+                answer[7 if what == "game keys" else 8] = stored or 0
+            return bytes(answer)
 
     def test_parts_go_to_ram(self):
         old = profile(1)
@@ -177,11 +183,19 @@ class RamUpdate(unittest.TestCase):
         self.assertEqual(kb.sent, [("ram", 0x0C, b"\x01\x00"), ("ram", 0x0D, bytes(new[z20.P_STATIC:z20.P_STATIC + 2])),
                                    ("key", 1, 45)])
 
+    def test_name_game_keys_and_rate(self):
+        old = profile(1)
+        new = z20.set_game_keys(z20.set_profile_name(old, "Games"), ["win", "alt-tab"])
+        new[z20.P_RATE] = z20.RATES[4000]
+        kb = self.Keyboard()
+        self.assertTrue(kb.update_ram(old, new))
+        self.assertEqual(kb.sent, [("game keys", 0xBE), ("rate", 0)])  # the name needs nothing
+
     def test_other_changes_need_a_reload(self):
         old = profile(1)
-        renamed = bytearray(old)
-        renamed[10] ^= 1  # the name
-        for new in (renamed, z20.set_sensor(old, ["leave", "lock"])):  # the sensor: never through RAM
+        reserved = bytearray(old)
+        reserved[140] ^= 1  # a reserved byte
+        for new in (reserved, z20.set_sensor(old, ["leave", "lock"])):  # the sensor: never through RAM
             kb = self.Keyboard()
             self.assertFalse(kb.update_ram(old, new))
             self.assertEqual(kb.sent, [])
@@ -283,6 +297,54 @@ class PresenceService(unittest.TestCase):
         self.assertEqual(desktop.calls, [])
         self.assertEqual(desktop.logged, ["  pause-media: paused a", "  resume-media: resumed a",
                                           "  resume-media: resumed nothing"])
+
+
+class GeneralSettings(unittest.TestCase):
+    def test_game_mode_keys_are_kept_inverted(self):
+        p = profile(1)
+        p[z20.P_GAME_KEYS] = 0xBF  # as profile 1 has it: only the Win key blocked
+        self.assertEqual(z20.game_keys(p), ["win"])
+        self.assertEqual(z20.set_game_keys(p, ["win", "alt-tab"])[z20.P_GAME_KEYS], 0xBE)
+        self.assertEqual(z20.game_keys(z20.set_game_keys(p, [])), [])
+
+    def test_report_rate(self):
+        p = profile(1)
+        p[z20.P_RATE] = 2
+        self.assertEqual(z20.rate_hz(p), 1000)
+        def rate(sub, value=0):
+            r = report(7, 0xEA, 0x02, 0x1B, sub, 0, 0, 0, value)
+            r[7] = z20.checksum(r)
+            return r
+        for r in (rate(z20.READ), rate(2), rate(z20.WRITE, 0), rate(z20.WRITE, 2)):
+            z20.check_request(r)
+        bad = rate(z20.WRITE, 1)
+        bad[7] ^= 1
+        for r in (bad, rate(z20.WRITE, 3)):  # 3 would be 8000 Hz, which Unleash doesn't offer for the Z20
+            with self.assertRaises(z20.Z20Error):
+                z20.check_request(r)
+
+    def test_nkro_switch(self):
+        z20.check_request(report(4, 0xEA, 0x02, 0x0F, z20.WRITE, 0, 0, 1))
+        with self.assertRaises(z20.Z20Error):
+            z20.check_request(report(4, 0xEA, 0x02, 0x0F, z20.WRITE, 0, 0, 2))
+
+    def test_profile_name_and_factory_parts(self):
+        p = z20.set_profile_name(profile(3), "Spiele")
+        self.assertEqual(z20.profile_name(p), "Spiele")
+        self.assertEqual(p[z20.P_NAME + 12:z20.P_NAME + 14], b"\xff\xff")
+        with self.assertRaises(z20.Z20Error):
+            z20.set_profile_name(p, "x" * 64)
+        factory = bytearray(profile(254))
+        for i in range(8, len(factory)):
+            factory[i] = (factory[i] + 1) & 0xFF
+        q = z20.from_factory(p, factory, z20.FACTORY_LIGHTING)
+        expected = {*range(1288, 1290), *range(1320, 1597)}
+        self.assertEqual({i for i in range(len(p)) if p[i] != q[i]}, expected)
+
+    def test_events(self):
+        self.assertIsNone(z20.keyboard_event(bytes([1, 1, 0, 0])))  # a macro's mouse click
+        self.assertEqual(z20.keyboard_event(bytes([3, 0, 2, 0, 0, 0])), {"event": "profile", "value": 2})
+        self.assertEqual(z20.keyboard_event(bytes([2, 0xE9, 0])), {"event": "media key", "key": "VolumeUp"})
 
 
 class Answers(unittest.TestCase):
