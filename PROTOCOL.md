@@ -133,7 +133,15 @@ HID usages up to `FF`, so F13-F24 (`68`-`73`) work: Fn + E4 set to `00 00 69 00`
 sends F14.
 
 The factory profile (254) has E1-E5 disabled; for the other keys both
-layers hold the key itself (the Fn layer of W is W).
+layers hold the key itself (the Fn layer of W is W). Checked: CapsLock set to
+`00 01 00 00` sends left Ctrl, and Fn + Q set to `00 00 6B 00` sends F16.
+
+What Unleash leaves alone: it offers no Fn layer for 1-0, F12, both Alt keys
+and the arrows (Fn + those are the keyboard's own: profiles, recording
+macros, brightness and effect), and its "reset keys" copies both key tables
+from the factory profile but keeps the Windows key (104) and Fn (108) as
+they were, and deletes all macros. `z20 key all default` does the same
+without deleting macros, and `z20` never changes Fn.
 
 Key positions: 0 Game Mode key, 1 Esc, 2-13 F1-F12, 14 Print, 15 Scroll Lock,
 16 Pause, 18-20 media previous / play / next, **21 E1**, 22 `` ` ``, 23-32 1-0,

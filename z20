@@ -10,11 +10,13 @@
                                         or media key alone is pressed and let go
   z20 profile N                         switch to profile 1-9
   z20 game-mode on | off | toggle
-  z20 key E1-E5 [--json]                what the macro key does
-  z20 key E1-E5 macro N [--toggle | --hold | --repeat N]
+  z20 key KEY [--json]                  what a key does (e1-e5, capslock, f1, a, comma, game ...;
+                                        named as on a US keyboard)
+  z20 key KEY macro N [--toggle | --hold | --repeat N]
                                         run macro N (see z20 macros) once, N times, until the
                                         key is pressed again or while it is held
-  z20 key E1-E5 key ctrl+c | media playpause | click left | wheel up | profile 2 | off | default
+  z20 key KEY key ctrl+c | media playpause | click left | wheel up | profile 2 | off | default
+  z20 key all default                   every key as from the factory (also E1-E5), but Win and Fn
   z20 key ... --fn                      the key's Fn layer
   z20 key ... --profile N               another profile than the active one
   z20 light [--json]                    lighting of the active profile
@@ -98,6 +100,34 @@ P_STARS_BRIGHTNESS = P_STARS + 18
 
 E_KEYS = {"E1": 21, "E2": 43, "E3": 65, "E4": 82, "E5": 102}  # key positions
 
+# Key positions (index into a profile's key table), named after the US layout: the
+# position is the key's place on the keyboard, whatever the computer's layout makes of it.
+KEY_POSITIONS = {0: "Game", 1: "Esc", **{2 + i: f"F{i + 1}" for i in range(12)}, 14: "PrintScreen",
+                 15: "ScrollLock", 16: "Pause", 18: "PrevTrack", 19: "PlayPause", 20: "NextTrack",
+                 21: "E1", 22: "`", **{23 + i: str((i + 1) % 10) for i in range(10)}, 33: "-", 34: "=",
+                 35: "Backspace", 36: "Insert", 37: "Home", 38: "PageUp", 39: "NumLock", 40: "KP/",
+                 41: "KP*", 42: "KP-", 43: "E2", 44: "Tab", **dict(zip(range(45, 55), "QWERTYUIOP")),
+                 55: "[", 56: "]", 57: "\\", 58: "Delete", 59: "End", 60: "PageDown", 61: "KP7", 62: "KP8",
+                 63: "KP9", 64: "KPPlus", 65: "E3", 66: "CapsLock", **dict(zip(range(67, 76), "ASDFGHJKL")),
+                 76: ";", 77: "'", 78: "Enter", 79: "KP4", 80: "KP5", 81: "KP6", 82: "E4", 83: "LShift",
+                 **dict(zip(range(84, 91), "ZXCVBNM")), 91: "Comma", 92: ".", 93: "/", 94: "RShift", 96: "Up",
+                 98: "KP1", 99: "KP2", 100: "KP3", 101: "KPEnter", 102: "E5", 103: "LCtrl", 104: "LGUI",
+                 105: "LAlt", 106: "Space", 107: "RAlt", 108: "Fn", 109: "Menu", 110: "RCtrl", 111: "Left",
+                 112: "Down", 113: "Right", 114: "KP0", 115: "KP.", 116: "WheelUp", 117: "WheelDown",
+                 118: "Mute", 119: "#", 120: "ISO\\"}
+# Names that are easier to type in a shell, for keys and for key codes.
+KEY_ALIASES = {"grave": "`", "minus": "-", "equal": "=", "lbracket": "[", "rbracket": "]", "backslash": "\\",
+               "semicolon": ";", "apostrophe": "'", "quote": "'", "period": ".", "dot": ".", "slash": "/",
+               "hash": "#", "isobackslash": "ISO\\", "escape": "Esc", "return": "Enter", "del": "Delete",
+               "ins": "Insert", "pgup": "PageUp", "pgdn": "PageDown", "win": "LGUI", "super": "LGUI"}
+KEY_BY_NAME = {**{name.lower(): pos for pos, name in KEY_POSITIONS.items()},
+               **{alias: [p for p, n in KEY_POSITIONS.items() if n == name][0] for alias, name in KEY_ALIASES.items()}}
+FN = 108
+# Fn + these is the keyboard's own: profiles (1-9), brightness and effect (arrows),
+# recording macros (Alt), and F12; Unleash doesn't let their Fn layer change either.
+FN_RESERVED = {13, *range(23, 33), 96, 105, 107, 111, 112, 113}
+KEEP_ON_RESET = (104, FN)  # Unleash's key reset keeps the Win and Fn keys as they are
+
 HID_KEYS = {**{4 + i: chr(ord("A") + i) for i in range(26)},
             **{30 + i: str((i + 1) % 10) for i in range(10)},
             40: "Enter", 41: "Esc", 42: "Backspace", 43: "Tab", 44: "Space", 45: "-", 46: "=",
@@ -122,8 +152,8 @@ FUNCTIONS = {4: "Fn", 5: "Game Mode", 7: "left click", 8: "right click", 9: "mid
 DEFAULT_PROFILE = 254  # the factory settings, only read
 
 # Names `z20 key` takes, in lower case.
-KEY_USAGES = {**{name.lower(): usage for usage, name in HID_KEYS.items()},
-              "escape": 41, "return": 40, "del": 76, "ins": 73, "pgup": 75, "pgdn": 78}
+KEY_USAGES = {name.lower(): usage for usage, name in HID_KEYS.items()}
+KEY_USAGES.update({alias: KEY_USAGES[name.lower()] for alias, name in KEY_ALIASES.items() if name.lower() in KEY_USAGES})
 MODIFIER_BITS = {"ctrl": 0x01, "lctrl": 0x01, "shift": 0x02, "lshift": 0x02, "alt": 0x04, "lalt": 0x04,
                  "super": 0x08, "meta": 0x08, "win": 0x08, "lgui": 0x08, "rctrl": 0x10, "rshift": 0x20,
                  "ralt": 0x40, "altgr": 0x40, "rsuper": 0x80, "rgui": 0x80}
@@ -402,6 +432,40 @@ def parse_function(words, macro_slots, run):
     raise Z20Error(f"unknown key function: {' '.join(words)}")
 
 
+def key_target(name, fn):
+    """The position of the key `z20 key` names, if that key (or its Fn layer) may change."""
+    pos = KEY_BY_NAME.get(name.lower())
+    if pos is None:
+        raise Z20Error(f"no key {name} (names as on a US keyboard: a, f1, capslock, comma, e1, game ...)")
+    if pos == FN:
+        raise Z20Error("Fn stays Fn: the keyboard's own Fn shortcuts (profiles, brightness, recording) need it")
+    if fn and pos in FN_RESERVED:
+        raise Z20Error(f"Fn+{KEY_POSITIONS[pos]} is one of the keyboard's own shortcuts")
+    return pos
+
+
+def reset_keys(profile, factory):
+    """The profile with every key function as in the factory profile, but for Win and Fn."""
+    p = bytearray(profile)
+    for base in (P_KEYS, P_FN_KEYS):
+        keep = {pos: p[base + pos * 4:base + pos * 4 + 4] for pos in KEEP_ON_RESET}
+        p[base:base + 121 * 4] = factory[base:base + 121 * 4]
+        for pos, function in keep.items():
+            p[base + pos * 4:base + pos * 4 + 4] = function
+    return p
+
+
+def changed_keys(profile, factory, skip=()):
+    """(label, 4-byte function) of the keys whose function differs from the factory setting."""
+    out = []
+    for pos, name in KEY_POSITIONS.items():
+        for prefix, base in (("", P_KEYS), ("Fn+", P_FN_KEYS)):
+            at = base + pos * 4
+            if pos not in skip and profile[at:at + 4] != factory[at:at + 4]:
+                out.append((prefix + name, profile[at:at + 4]))
+    return out
+
+
 def parse_steps(text):
     """Macro data from steps as `z20 macros` prints them, like "LShift down, W, wait 20 ms,
     LShift up". A key, click ("left click") or media key without down / up is pressed and
@@ -557,9 +621,13 @@ def status(kb):
             if layer == label or b[0] != 0xFF:  # the Fn layer only where it does something
                 text, info = key_function(b, names)
                 keys[layer] = {"text": text, **info}
+    changed = {}
+    for label, b in changed_keys(p, kb.read_profile(DEFAULT_PROFILE), skip=E_KEYS.values()):
+        text, info = key_function(b, names)
+        changed[label] = {"text": text, **info}
     return {"model": kb.model, "firmware": kb.firmware(), "profile": n, "profile_name": profile_name(p),
             "game_mode": kb.game_mode(), "nkro": kb.nkro(), "lighting": lighting(p),
-            "keys": keys, "macros": {str(m): name for m, name in names.items()}}
+            "keys": keys, "changed_keys": changed, "macros": {str(m): name for m, name in names.items()}}
 
 
 def macros(kb):
@@ -585,7 +653,7 @@ def backup(kb):
 
 def macro_users(kb, n):
     """The keys in profiles 1-9 (either layer) that run macro n."""
-    labels = {pos: label for label, pos in E_KEYS.items()}
+    labels = KEY_POSITIONS
     users = []
     for p in range(1, 10):
         profile = kb.read_profile(p)
@@ -681,8 +749,10 @@ def main():
             parser.error(f"light {v[0]}: " + (f"needs {'one or two colors' if v[0] == 'breathing' else 'a color'}"
                                               if wanted[0] else "takes no colors"))
     if args.command == "key":
-        if not v or v[0].upper() not in E_KEYS:
-            parser.error("key: E1, E2, E3, E4 or E5")
+        if not v:
+            parser.error("key: which key (e1, capslock, f1, a ...), or all")
+        if v[0].lower() == "all" and (v[1:] != ["default"] or args.fn):
+            parser.error("key all: only 'key all default' (every key back to the factory setting)")
         if (args.toggle or args.hold or args.repeat) and v[1:2] != ["macro"]:
             parser.error("--toggle, --hold and --repeat are for macros")
     if args.command == "macro":
@@ -709,10 +779,15 @@ def main():
                 print(f"lighting: {lighting_text(s['lighting'])}")
                 for label, key in s["keys"].items():
                     print(f"{label:7} {key['text']}")
+                if s["changed_keys"]:
+                    print("other keys, changed from the factory setting:")
+                    for label, key in s["changed_keys"].items():
+                        print(f"  {label:12} {key['text']}")
+                on_keys = [*s["keys"].values(), *s["changed_keys"].values()]
                 unused = [f"{m} \"{name}\"" for m, name in s["macros"].items()
-                          if not any(k.get("macro") == int(m) for k in s["keys"].values())]
+                          if not any(k.get("macro") == int(m) for k in on_keys)]
                 if unused:
-                    print(f"macros on no E key: {', '.join(unused)}")
+                    print(f"macros on no key: {', '.join(unused)}")
         elif args.command == "macros":
             ms = macros(kb)
             if args.json:
@@ -735,10 +810,16 @@ def main():
             if args.json or sys.stdout.isatty():
                 on = kb.game_mode()
                 print(json.dumps({"game_mode": on}) if args.json else f"Game Mode {'on' if on else 'off'}")
+        elif args.command == "key" and v[0].lower() == "all":
+            n = args.profile or kb.profile_number()
+            kb.write_profile(n, reset_keys(kb.read_profile(n), kb.read_profile(DEFAULT_PROFILE)))
+            print(json.dumps({"profile": n, "keys": "default"}) if args.json
+                  else f"profile {n}: every key as from the factory (Win and Fn as they were), macros kept")
         elif args.command == "key":
             n = args.profile or kb.profile_number()
-            label = ("Fn+" if args.fn else "") + v[0].upper()
-            at = (P_FN_KEYS if args.fn else P_KEYS) + E_KEYS[v[0].upper()] * 4
+            pos = key_target(v[0], args.fn)
+            label = ("Fn+" if args.fn else "") + KEY_POSITIONS[pos]
+            at = (P_FN_KEYS if args.fn else P_KEYS) + pos * 4
             p = kb.read_profile(n)
             if len(v) > 1:
                 if v[1:] == ["default"]:

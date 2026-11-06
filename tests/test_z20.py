@@ -182,6 +182,35 @@ class Reports(unittest.TestCase):
             with self.assertRaises(z20.Z20Error, msg=words):
                 parse(words, slots, (11, 1))
 
+    def test_key_names(self):
+        self.assertEqual(len(set(z20.KEY_POSITIONS.values())), len(z20.KEY_POSITIONS))
+        for name, pos in (("capslock", 66), ("E1", 21), ("grave", 22), ("Comma", 91), ("win", 104),
+                          ("y", 50), ("game", 0), ("q", 45)):
+            self.assertEqual(z20.key_target(name, False), pos, name)
+        self.assertEqual(z20.key_target("q", True), 45)
+        for name, fn in (("fn", False), ("fn", True), ("1", True), ("up", True), ("ralt", True), ("nosuch", False)):
+            with self.assertRaises(z20.Z20Error, msg=name):
+                z20.key_target(name, fn)
+
+    def test_all_keys_back_to_factory_but_win_and_fn(self):
+        p, factory = profile(1), bytearray(profile(254))
+        for i in range(z20.P_KEYS, z20.P_FN_KEYS + 121 * 4):
+            factory[i] = (factory[i] + 1) & 0xFF
+        q = z20.reset_keys(p, factory)
+        keep = {base + pos * 4 + i for base in (z20.P_KEYS, z20.P_FN_KEYS) for pos in (104, 108) for i in range(4)}
+        for i in range(len(p)):
+            in_tables = z20.P_KEYS <= i < z20.P_FN_KEYS + 121 * 4
+            self.assertEqual(q[i], factory[i] if in_tables and i not in keep else p[i], i)
+
+    def test_changed_keys(self):
+        factory = profile(254)
+        p = bytearray(factory)
+        p[z20.P_KEYS + 66 * 4:z20.P_KEYS + 67 * 4] = b"\x00\x01\x00\x00"
+        p[z20.P_FN_KEYS + 45 * 4 + 2] ^= 1
+        p[z20.P_KEYS + 21 * 4] ^= 1  # E1, skipped
+        self.assertEqual([label for label, _ in z20.changed_keys(p, factory, skip=z20.E_KEYS.values())],
+                         ["Fn+Q", "CapsLock"])
+
     def test_profile_name(self):
         p = profile()
         name = "DEFAULT 1".encode("utf-16-le")

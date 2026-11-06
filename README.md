@@ -9,8 +9,10 @@ hidraw.
   stars, reactive and more, with color, brightness and speed
 - **Profiles and Game Mode:** switch profiles 1–9, turn Game Mode on or off
 - **Backup and restore** of all nine profiles and the stored macros
-- **Macro keys E1–E5:** see and change what they do (a stored macro once,
-  N times, toggled or held; a key combination, media key, click, profile)
+- **Keys:** see and change what any key does, also the macro keys E1–E5 and
+  the Fn layer (a stored macro once, N times, toggled or held; a key
+  combination, media key, click, profile); back to the factory setting one
+  by one or all at once
 - **Macros:** list them step by step; create, edit, rename and delete them
 - **JSON output** for widgets and scripts
 
@@ -43,12 +45,13 @@ z20 macro new Hi "LShift down, H, LShift up, I"
 z20 macro edit 5 "ctrl down, c, ctrl up" | rename 5 Copy | delete 5
 z20 profile N                         switch to profile 1-9 (also Fn + 1-9)
 z20 game-mode on | off | toggle
-z20 key E4                            what macro key E4 does
+z20 key E4                            what macro key E4 does (or capslock, f1, a, game ...)
 z20 key E4 macro 2                    run macro 2 once (z20 macros lists them)
 z20 key E4 macro 2 --repeat 3 | --toggle | --hold
                                       3 times, until E4 is pressed again, while E4 is held
-z20 key E4 key ctrl+shift+t           or: media playpause, click left, wheel up,
-                                      profile 2, off, default (factory setting)
+z20 key capslock key lctrl            or: key ctrl+shift+t, media playpause, click left,
+                                      wheel up, profile 2, off, default (factory setting)
+z20 key all default                   every key as from the factory, E1-E5 too (not Win, Fn)
 z20 key ... --fn | --profile N        the key's Fn layer, another profile
 z20 light [--json]                    lighting of the active profile
 z20 light off
@@ -73,8 +76,21 @@ E2      left click
 E3      macro 3 "Autoclick" (loop until pressed again)
 E4      disabled
 E5      disabled
-macros on no E key: 2 "New Macro", 4 "Laugh"
+macros on no key: 2 "New Macro", 4 "Laugh"
 ```
+
+`status` also lists every other key that does something else than from the
+factory.
+
+Keys are named as on a US keyboard, because a key function belongs to a
+place on the keyboard: on a German one, `z20 key y` is the key printed "Z".
+The names are the ones `z20 macros` uses (`A`, `F1`, `CapsLock`, `Comma`,
+`KPPlus`, `LShift`, ...), plus `E1`-`E5`, `Game` (the Game Mode key),
+`PlayPause`, `WheelUp` / `WheelDown` (the volume wheel) and `Mute`; signs
+can also be written as words (`grave`, `minus`, `semicolon`, `slash`, ...).
+Fn itself stays Fn, and the Fn layer of 1-0, F12, Alt and the arrow keys
+stays the keyboard's own (profiles, brightness, recording macros), as in
+Unleash.
 
 Lighting belongs to a profile: each of the nine profiles has its own effect
 and keeps settings for every effect, so `z20 light wave` switches back to the
@@ -155,7 +171,6 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 
 ## Not done yet
 
-- `z20 key` for keys other than E1-E5 (PROTOCOL.md lists their positions).
 - Colors per key and live effects; [OpenRGB](https://openrgb.org) already
   does those for the Z20.
 - The brightness set with Fn + Up / Down: where the keyboard keeps it isn't
