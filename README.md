@@ -184,8 +184,9 @@ distance = 45
 # seconds away before "leave" runs, seconds near again before "come" runs
 leave after = 30
 come after = 1
-# actions: lock, screen-off, wake, pause-media, resume-media
-leave = lock, pause-media
+# actions: lock, screen-off, wake, pause-media, resume-media; each may wait
+# "after SECONDS" from the moment the service saw you leave or come back
+leave = lock, pause-media, screen-off after 60
 come = wake, resume-media
 # and a command of your own, if you like
 leave run = notify-send "z20" "see you"
@@ -194,7 +195,9 @@ leave run = notify-send "z20" "see you"
 `lock` is `loginctl lock-session`; `screen-off` and `wake` use KDE's
 `kscreen-doctor` and the screen saver's `SimulateUserActivity`;
 `pause-media` pauses the media players that are playing (MPRIS) and
-`resume-media` starts only those again. Without a config file: leave =
+`resume-media` starts only those again. Coming back drops what leaving
+still had waiting (no screen-off after you sat down again), and the other
+way round. Without a config file: leave =
 `pause-media`, come = `wake, resume-media`. It reads the distance twice a
 second and decides on the median of the last five readings (single ones
 jump by a few centimetres), keeps waiting while the keyboard is unplugged

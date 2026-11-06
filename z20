@@ -844,10 +844,13 @@ def presence_config(path=PRESENCE_CONFIG):
     except ValueError as e:
         raise Z20Error(f"{path}: {e}") from None
     for event in ("leave", "come"):
-        cfg[event] = [a.strip() for a in section[event].split(",") if a.strip()]
-        unknown = [a for a in cfg[event] if a not in PRESENCE_ACTIONS]
-        if unknown:
-            raise Z20Error(f"{path}: {event}: unknown action {', '.join(unknown)} (known: {', '.join(PRESENCE_ACTIONS)})")
+        cfg[event] = []  # (action, seconds after the event)
+        for item in (a.strip() for a in section[event].split(",") if a.strip()):
+            found = re.fullmatch(r"([a-z-]+)(?:\s+after\s+(\d+(?:\.\d+)?)\s*s?)?", item)
+            if not found or found.group(1) not in PRESENCE_ACTIONS:
+                raise Z20Error(f"{path}: {event}: not an action: {item} "
+                               f"(known: {', '.join(PRESENCE_ACTIONS)}, each with an optional 'after SECONDS')")
+            cfg[event].append((found.group(1), float(found.group(2) or 0)))
         cfg[f"{event}_run"] = section[f"{event} run"]
     return cfg
 
@@ -871,6 +874,21 @@ class Presence:
             self.present, self.since = near, None
             return "come" if near else "leave"
         return None
+
+
+class Pending:
+    """Actions due some seconds after the last event; the next event drops what is left."""
+
+    def __init__(self):
+        self.items = []
+
+    def set(self, actions, now):
+        self.items = [(now + delay, action) for action, delay in actions]
+
+    def due(self, now):
+        ready = [action for when, action in self.items if when <= now]
+        self.items = [(when, action) for when, action in self.items if when > now]
+        return ready
 
 
 class Desktop:
@@ -943,10 +961,12 @@ def presence(dry_run):
     cfg = presence_config()
     desktop = Desktop(dry_run)
     tracker = Presence(cfg["leave_after"], cfg["come_after"])
+    pending = Pending()
     threshold, checked = cfg["distance_mm"], 0.0
-    desktop.log(f"presence: leave after {cfg['leave_after']:g} s: {', '.join(cfg['leave']) or '-'}"
+    actions = lambda event: ", ".join(a + (f" after {d:g} s" if d else "") for a, d in cfg[event]) or "-"
+    desktop.log(f"presence: leave after {cfg['leave_after']:g} s: {actions('leave')}"
                 f"{'; ' + cfg['leave_run'] if cfg['leave_run'] else ''}; come after {cfg['come_after']:g} s: "
-                f"{', '.join(cfg['come']) or '-'}{'; ' + cfg['come_run'] if cfg['come_run'] else ''}"
+                f"{actions('come')}{'; ' + cfg['come_run'] if cfg['come_run'] else ''}"
                 f"{' (dry run)' if dry_run else ''}; config {PRESENCE_CONFIG}"
                 f"{'' if os.path.exists(PRESENCE_CONFIG) else ' (not there: defaults)'}")
     trouble, recent = None, []
@@ -971,13 +991,15 @@ def presence(dry_run):
             trouble = None
         recent = (recent + [d])[-5:]  # the median of the last 2.5 s: single readings jump around
         median = sorted(recent)[len(recent) // 2]
-        event = tracker.update(median < threshold, time.monotonic())
+        now = time.monotonic()
+        event = tracker.update(median < threshold, now)
         if event:
             desktop.log(f"{'left' if event == 'leave' else 'back'}: {median} mm (present within {threshold / 10:g} cm)")
-            for action in cfg[event]:
-                desktop.do(action)
+            pending.set(cfg[event], now)  # coming back drops what leaving left pending, and the other way round
             if cfg[f"{event}_run"]:
                 desktop.run(cfg[f"{event}_run"])
+        for action in pending.due(now):
+            desktop.do(action)
         time.sleep(0.5)
 
 

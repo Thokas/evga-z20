@@ -230,18 +230,29 @@ class PresenceService(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "presence.ini")
-            self.assertEqual(z20.presence_config(path)["leave"], ["pause-media"])  # no file: defaults
+            self.assertEqual(z20.presence_config(path)["leave"], [("pause-media", 0)])  # no file: defaults
             with open(path, "w") as f:
-                f.write("[presence]\nleave after = 20\ndistance = 45\nleave = lock, pause-media\n"
+                f.write("[presence]\nleave after = 20\ndistance = 45\nleave = lock, pause-media, screen-off after 60\n"
                         "come = wake\nleave run = notify-send 'bye, see you'\n")
             cfg = z20.presence_config(path)
             self.assertEqual((cfg["leave_after"], cfg["come_after"], cfg["distance_mm"], cfg["leave"], cfg["come"],
                               cfg["leave_run"], cfg["come_run"]),
-                             (20.0, 1.0, 450, ["lock", "pause-media"], ["wake"], "notify-send 'bye, see you'", ""))
-            with open(path, "w") as f:
-                f.write("[presence]\nleave = lock, explode\n")
-            with self.assertRaises(z20.Z20Error):
-                z20.presence_config(path)
+                             (20.0, 1.0, 450, [("lock", 0), ("pause-media", 0), ("screen-off", 60)], [("wake", 0)],
+                              "notify-send 'bye, see you'", ""))
+            for bad in ("lock, explode", "screen-off after", "screen-off after soon", "lock after -1"):
+                with open(path, "w") as f:
+                    f.write(f"[presence]\nleave = {bad}\n")
+                with self.assertRaises(z20.Z20Error, msg=bad):
+                    z20.presence_config(path)
+
+    def test_delayed_actions_and_coming_back_early(self):
+        p = z20.Pending()
+        p.set([("lock", 0), ("screen-off", 60)], now=100)
+        self.assertEqual((p.due(100), p.due(130), p.due(160)), (["lock"], [], ["screen-off"]))
+        p.set([("lock", 0), ("screen-off", 60)], now=200)
+        self.assertEqual(p.due(200), ["lock"])
+        p.set([("wake", 0)], now=230)  # back before the screen went off
+        self.assertEqual((p.due(230), p.due(300)), (["wake"], []))
 
     def test_resume_only_what_was_paused(self):
         class Desktop(z20.Desktop):
