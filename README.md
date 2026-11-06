@@ -209,6 +209,8 @@ The effects use a map of where each LED sits (keys in key widths, the light
 bars at the sides), ISO or ANSI as the keyboard is. They pause while the
 screen is locked (the keyboard's own lighting shows then) and while the
 keyboard is unplugged. One runs at a time; a new one replaces the last.
+It says when it pauses and when a frame comes late, and why (in the
+service: `journalctl --user -u z20-animate`).
 `--save` keeps the effect in `~/.config/z20/animation.ini` and enables the
 `z20-animate` service; `--live` runs it in the service only until
 `z20 animate reload` (back to the saved one) or logging out. While one

@@ -385,12 +385,16 @@ class Keyboard:
         time.sleep(0.005)
 
     def send_locked(self, request):
-        """send() for a Keyboard opened with lock=False: holds the lock only while sending."""
+        """send() for a Keyboard opened with lock=False: holds the lock only while sending.
+        Returns how long it waited for the lock (while another z20 run had the keyboard)."""
+        start = time.monotonic()
         fcntl.flock(self.fd, fcntl.LOCK_EX)
+        waited = time.monotonic() - start
         try:
             self.send(request)
         finally:
             fcntl.flock(self.fd, fcntl.LOCK_UN)
+        return waited
 
     def read_ram(self, block):
         return self.call(bytes([7, *HEADER, block, READ]), 0.005)[8:]
@@ -1413,16 +1417,26 @@ def run_animation(effect, colors, cycle, brightness, how):
                                 "brightness": brightness, "how": how})
     colors_at = None  # once the keyboard is there: its layout (ISO or ANSI)
     level = 0xFF if brightness is None else round(brightness * 255 / 100)
-    desktop, kb, shown, sent, locked, looked = Desktop(), None, None, 0.0, False, -10.0
+    desktop, kb, shown, sent, locked, looked, trouble = Desktop(), None, None, 0.0, False, -10.0, None
+    say = lambda text: print(f"{time.strftime('%H:%M:%S')}  {text}", flush=True)
+    say(f"z20 animate {effect}: running")
     start = time.monotonic()
     try:
         while True:
             now = time.monotonic()
+            checked = waited = 0.0
             if now - looked >= 2:
+                was = locked
                 locked, looked = screen_locked(desktop), now
+                checked = time.monotonic() - now
+                if locked != was:
+                    say("screen locked: paused, the profile's lighting shows" if locked else "screen unlocked: on again")
             try:
                 if kb is None:
                     kb = Keyboard(lock=False)
+                    if trouble:
+                        say("keyboard back: on again")
+                        trouble = None
                 if colors_at is None:
                     layout = led_layout(iso=kb.model.endswith("ISO"))
                     colors_at = animation(effect, [tuple(parse_color(c)) for c in colors], cycle, layout)
@@ -1434,14 +1448,22 @@ def run_animation(effect, colors, cycle, brightness, how):
                     continue
                 frame = animation_frame(colors_at(now - start), level)
                 if frame != shown or now - sent >= 1:  # still effects: once a second
-                    kb.send_locked(color_report(frame))
+                    waited = kb.send_locked(color_report(frame))
                     shown, sent = frame, now
-            except Z20Error:  # unplugged: wait for it
+            except Z20Error as e:  # unplugged: wait for it
+                if str(e) != trouble:
+                    say(f"{e}: waiting for the keyboard")
+                    trouble = str(e)
                 if kb:
                     kb.close()
                 kb, shown = None, None
                 time.sleep(2)
-            time.sleep(max(0.0, FRAME_S - (time.monotonic() - now)))
+                continue
+            took = time.monotonic() - now
+            if took > 2 * FRAME_S:  # a frame that came late: why
+                say(f"a frame took {took * 1000:.0f} ms: {waited * 1000:.0f} ms waiting while another z20 run "
+                    f"had the keyboard, {checked * 1000:.0f} ms asking whether the screen is locked")
+            time.sleep(max(0.0, FRAME_S - took))
     except KeyboardInterrupt:
         pass
     finally:
