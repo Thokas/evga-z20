@@ -494,6 +494,20 @@ class Lighting(unittest.TestCase):
         self.assertEqual(changed(p, q) - {1288, 1289}, set())
         self.assertEqual((q[1288], q[1289]), (5, p[z20.P_WAVE + 4]))  # the wave's own direction
 
+    def test_colors_fill_the_effect(self):
+        red, blue = b"\xff\x00\x00", b"\x00\x00\xff"
+        self.assertEqual(z20.fill_colors("wave", [red, blue]), [red, blue] * 4)
+        self.assertEqual(len(z20.fill_colors("rows", [red])), 7)
+        self.assertEqual(z20.fill_colors("breathing", [red]), [red, b"\0\0\0"])
+        self.assertEqual(z20.fill_colors("static", [red]), [red])
+        self.assertEqual(z20.fill_colors("wave", []), [])  # the stored ones
+
+    def test_direction(self):
+        q = z20.set_lighting(profile(), "wave", [], None, None, "left")
+        self.assertEqual((q[z20.P_WAVE + 4], q[z20.P_EFFECT + 1]), (3, 3))
+        q = z20.set_lighting(profile(), "spiral", [], None, None, "ccw")
+        self.assertEqual((q[z20.P_SPIRAL + 3], q[z20.P_EFFECT + 1]), (1, 1))
+
     def test_off(self):
         q = z20.set_lighting(profile(), "off", [], None, None)
         self.assertEqual(z20.lighting(q), {"effect": "off"})

@@ -26,9 +26,10 @@
   z20 key ... --profile N               another profile than the active one
   z20 light [--json]                    lighting of the active profile
   z20 light off | static [COLOR] | breathing [COLOR [COLOR]]
-  z20 light wave | spiral | pulse | stars | reactive | fade | rows
-                                        that effect, with the colors the profile keeps for it
-                                        (so do static and breathing without colors)
+  z20 light wave | spiral | pulse | reactive | rows [COLOR ...] | stars | fade
+                                        that effect; colors given repeat to fill its 7-8,
+                                        without colors it keeps the ones the profile has
+  z20 light ... --direction D           wave: up, down, left, right; spiral: cw, ccw
   z20 light ... --profile N             another profile than the active one
   z20 light ... --brightness P          percent (0-100) for the effect's colors
   z20 light ... --cycle MS              length of one effect cycle (speed)
@@ -137,6 +138,8 @@ EFFECT_COLORS = {1: (P_STATIC + 16, 1, 4), 2: (P_BREATHING + 18, 2, 5), 3: (P_PU
                  4: (P_SPIRAL + 19, 8, 4), 5: (P_WAVE + 19, 8, 4), 7: (P_TRIGGER + 19, 8, 4),
                  16: (P_FADE + 16, 1, 4), 17: (P_ROWS + 17, 7, 4)}
 P_STARS_BRIGHTNESS = P_STARS + 18
+# --direction: the wave's and the spiral's (stored where EFFECT_SUB points)
+DIRECTIONS = {5: {"up": 0, "down": 1, "right": 2, "left": 3}, 4: {"cw": 0, "ccw": 1}}
 
 # Report 7: the active profile's lighting in RAM, one block at a time, the same layout as in
 # the profile, padded to 128 bytes: 07 EA 02 <block> <00 write / 01 read> 00 <status> <checksum>.
@@ -743,11 +746,25 @@ def parse_color(text):
     return bytes.fromhex(text.lstrip("#"))
 
 
-def set_lighting(p, effect, colors, brightness, cycle):
-    """The profile with another effect (and colors, brightness, cycle); everything else as it was."""
+def fill_colors(effect, colors):
+    """The colors for an effect: breathing out to dark from one color; the animated effects'
+    7-8 colors repeated from the ones given."""
+    count = EFFECT_COLORS.get(EFFECTS[effect], (0, 0, 0))[1]
+    if effect == "breathing" and len(colors) == 1:
+        return colors + [b"\0\0\0"]
+    if count > 2 and 0 < len(colors) < count:
+        return (colors * count)[:count]
+    return colors
+
+
+def set_lighting(p, effect, colors, brightness, cycle, direction=None):
+    """The profile with another effect (and colors, brightness, cycle, direction); everything
+    else as it was. Colors not given stay as the profile keeps them."""
     p = bytearray(p)
     p[P_EFFECT] = EFFECTS[effect]
     mode = EFFECTS[effect]
+    if direction is not None:
+        p[EFFECT_SUB[mode]] = DIRECTIONS[mode][direction]
     p[P_EFFECT + 1] = p[EFFECT_SUB[mode]] if mode in EFFECT_SUB else 0
     if mode in EFFECT_COLORS:
         offset, count, size = EFFECT_COLORS[mode]
@@ -1055,12 +1072,12 @@ def with_ram_lighting(kb, p, effect):
     return p
 
 
-def live_lighting(kb, effect, colors, brightness, cycle):
+def live_lighting(kb, effect, colors, brightness, cycle, direction=None):
     """Change the active profile's lighting in RAM only: shown at once, gone on reload."""
     stored = kb.read_profile(kb.profile_number())
     mode = EFFECTS[effect]
     before = with_ram_lighting(kb, stored, mode)
-    after = set_lighting(before, effect, colors, brightness, cycle)
+    after = set_lighting(before, effect, colors, brightness, cycle, direction)
     if mode in RAM_BLOCKS:
         block, at, size = RAM_BLOCKS[mode]
         ram = bytearray(kb.read_ram(block))
@@ -1330,6 +1347,8 @@ def main():
     parser.add_argument("--fn", action="store_true", help="key: its Fn layer")
     parser.add_argument("--brightness", type=int, choices=range(0, 101), metavar="P", help="percent")
     parser.add_argument("--cycle", type=int, metavar="MS", help="effect cycle in milliseconds")
+    parser.add_argument("--direction", choices=("up", "down", "left", "right", "cw", "ccw"),
+                        help="light wave / spiral: which way it runs")
     parser.add_argument("--live", action="store_true", help="light: in RAM only, until z20 light reload")
     parser.add_argument("--dry-run", action="store_true", help="presence: say what it would do instead")
     parser.add_argument("--wait", type=float, metavar="S", help="events: only the first within S seconds")
@@ -1360,10 +1379,12 @@ def main():
     if args.command == "light" and v and v not in (["reload"], ["default"]):
         if v[0] not in EFFECTS:
             parser.error(f"light: one of {', '.join(EFFECTS)}, or reload, default")
-        most = {"static": 1, "breathing": 2}.get(v[0], 0)  # without colors: the ones the profile keeps
+        most = EFFECT_COLORS.get(EFFECTS[v[0]], (0, 0, 0))[1]  # without colors: the ones the profile keeps
         if len(v) - 1 > most:
             parser.error(f"light {v[0]}: " + (f"at most {most} color{'s' if most > 1 else ''}" if most
                                               else "takes no colors"))
+        if args.direction and args.direction not in DIRECTIONS.get(EFFECTS[v[0]], {}):
+            parser.error("--direction: up, down, left or right for wave, cw or ccw for spiral")
     if args.command == "key":
         if not v:
             parser.error("key: which key (e1, capslock, f1, a ...), or all")
@@ -1515,13 +1536,11 @@ def main():
                 kb.write_profile(n, p)
                 stored = lighting(p)
             elif v and v != ["reload"]:
-                colors = [parse_color(c) for c in v[1:]]
-                if v[0] == "breathing" and len(colors) == 1:
-                    colors.append(b"\0\0\0")  # breathe out to dark
+                colors = fill_colors(v[0], [parse_color(c) for c in v[1:]])
                 if args.live:
-                    p = live_lighting(kb, v[0], colors, args.brightness, args.cycle)
+                    p = live_lighting(kb, v[0], colors, args.brightness, args.cycle, args.direction)
                 else:
-                    p = set_lighting(p, v[0], colors, args.brightness, args.cycle)
+                    p = set_lighting(p, v[0], colors, args.brightness, args.cycle, args.direction)
                     kb.write_profile(n, p)
                     stored = lighting(p)
             elif n == active:  # what is shown: RAM, which --live may have changed

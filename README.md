@@ -79,6 +79,9 @@ z20 light static ff8000               one color (rrggbb or #rrggbb; without: the
 z20 light breathing 00ff00 [0000ff]   breathe between two colors (or into dark)
 z20 light wave | spiral | pulse | stars | reactive | fade | rows
                                       that effect, with the colors the profile keeps for it
+z20 light wave 0040ff 00e0ff --direction left
+                                      or with your own colors (repeated to fill its 7-8);
+                                      wave: up, down, left, right; spiral: cw, ccw
 z20 light ... --profile N             another profile than the active one
 z20 light ... --brightness P          percent, for the effect's colors
 z20 light ... --cycle MS              length of one effect cycle (speed)
