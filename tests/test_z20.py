@@ -41,7 +41,8 @@ class Requests(unittest.TestCase):
                     z20.check_request(report(4, 0xEA, 0x02, command, sub))
 
     def test_never_sends_other_reports(self):
-        for rid, size in ((5, 521), (6, 792), (7, 136), (11, 2056), (15, 264)):  # 5 is the firmware update
+        # 5 is the firmware update; 6 and 7 (live lighting) are allowed in part, see LiveLighting
+        for rid, size in ((5, 521), (11, 2056), (12, 59), (15, 264)):
             with self.assertRaises(z20.Z20Error):
                 z20.check_request(report(rid, 0xEA, 0x02, z20.READ, size=size))
 
@@ -91,6 +92,52 @@ class Requests(unittest.TestCase):
                 z20.check_request(r)
         with self.assertRaises(z20.Z20Error):  # names are only read
             z20.check_request(report(10, 0xEA, 0x02, z20.WRITE, 3, 0, z20.FAIL))
+
+
+class LiveLighting(unittest.TestCase):
+    def test_led_colors_need_the_checksum(self):
+        frame = z20.color_frame(None, [("w,a,s,d", "ff0000"), ("bars", "00ff00")], None)
+        r = z20.color_report(frame)
+        z20.check_request(r)
+        self.assertEqual(bytes(r[8 + 46 * 4:8 + 47 * 4]), b"\xff\xff\x00\x00")  # W
+        self.assertEqual(bytes(r[8 + 160 * 4:8 + 161 * 4]), b"\xff\x00\xff\x00")  # LeftBar1
+        z20.check_request(report(6, 0xEA, 0x02, 0))  # stop
+        r[7] ^= 1
+        with self.assertRaises(z20.Z20Error):
+            z20.check_request(r)
+        with self.assertRaises(z20.Z20Error):
+            z20.check_request(report(6, 0xEA, 0x02, 2))
+
+    def test_led_names(self):
+        self.assertEqual(z20.led_targets("e1,logo1,RightBar9"), [21, 192, 184])
+        self.assertEqual(len(z20.led_targets("all")), len(z20.LED_NAMES))
+        frame = z20.color_frame(None, [("all", "000010"), ("q", "ff8000")], 50)
+        self.assertEqual(z20.colors_shown(frame)["#ff8000"], ["Q"])
+        with self.assertRaises(z20.Z20Error):
+            z20.led_targets("w,nosuch")
+
+    def test_ram_blocks_only_lighting(self):
+        def ram(block, sub, data=b""):
+            r = report(7, 0xEA, 0x02, block, sub)
+            r[8:8 + len(data)] = data
+            r[7] = z20.checksum(r)
+            return r
+
+        for block in range(0x0C, 0x16):
+            z20.check_request(ram(block, z20.READ))
+            z20.check_request(ram(block, z20.WRITE, b"\x05\x02"))
+        bad = ram(0x0C, z20.WRITE, b"\x05\x02")
+        bad[7] ^= 1
+        # 03-0A: the presence sensor, 0B: key functions, 00/01: Unleash's sync previews
+        for r in (bad, ram(0x03, z20.READ), ram(0x0B, z20.WRITE), ram(0x01, z20.WRITE), ram(0x16, z20.READ)):
+            with self.assertRaises(z20.Z20Error):
+                z20.check_request(r)
+
+    def test_ram_blocks_match_the_profile(self):
+        # block sizes in RAM_BLOCKS end where the next effect starts in the profile
+        ends = sorted((at, at + size) for _, at, size in z20.RAM_BLOCKS.values())
+        for (_, end), (start, _) in zip(ends, ends[1:]):
+            self.assertEqual(end, start)
 
 
 class Answers(unittest.TestCase):

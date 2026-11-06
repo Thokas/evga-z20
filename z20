@@ -26,6 +26,14 @@
   z20 light ... --profile N             another profile than the active one
   z20 light ... --brightness P          percent (0-100) for the effect's colors
   z20 light ... --cycle MS              length of one effect cycle (speed)
+  z20 light ... --live                  only in RAM: shown at once, never written to flash, gone
+                                        with z20 light reload, a profile switch or unplugging
+  z20 light reload                      back to the lighting the profile has stored
+  z20 color LEDS COLOR [LEDS COLOR ...] [--brightness P]
+                                        colors per LED, shown over the profile's lighting until
+                                        z20 color off; LEDS: w,a,s,d, e1, LeftBar1-9, RightBar1-9,
+                                        Logo1-4, or all, keys, bars, logo. Later calls add to it.
+  z20 color off
   z20 backup                            copy profiles 1-9 and the macros to ~/.local/state/z20/backups/
   z20 restore DIR [--profile N | --macro N]
                                         write profiles and macros back from a backup (all in DIR,
@@ -56,7 +64,7 @@ PRODUCTS = {0x260A: "Z20 Elite", 0x260C: "Z20 RGB", 0x2610: "Z20 Elite ISO", 0x2
 STATE = os.path.expanduser("~/.local/state/z20")
 
 # Feature report ID -> length including the ID byte (from the report descriptor).
-SIZES = {4: 17, 8: 1806, 9: 1032, 10: 59}
+SIZES = {4: 17, 6: 792, 7: 136, 8: 1806, 9: 1032, 10: 59}
 HEADER = b"\xea\x02"
 READ, WRITE = 1, 0
 SUCCESS = 0xC0
@@ -66,7 +74,7 @@ FAIL = 0xC1
 # firmware also knows reset (02), erase firmware (03), bootloader (04), reset
 # profile (09) and factory reset (31): those never go out.
 GENERAL = {0x01: "firmware version", 0x06: "profile", 0x07: "key function", 0x08: "reload profile",
-           0x0B: "Game Mode", 0x0F: "6KRO/NKRO"}
+           0x0B: "Game Mode", 0x0F: "6KRO/NKRO", 0x41: "distance (presence sensor)"}
 GENERAL_WRITES = {0x06, 0x08, 0x0B}
 
 # Report 8, one profile: offsets into the report (byte 0 is the report ID).
@@ -98,6 +106,17 @@ EFFECT_COLORS = {1: (P_STATIC + 16, 1, 4), 2: (P_BREATHING + 18, 2, 5), 3: (P_PU
                  16: (P_FADE + 16, 1, 4), 17: (P_ROWS + 17, 7, 4)}
 P_STARS_BRIGHTNESS = P_STARS + 18
 
+# Report 7: the active profile's lighting in RAM, one block at a time, the same layout as in
+# the profile, padded to 128 bytes: 07 EA 02 <block> <00 write / 01 read> 00 <status> <checksum>.
+# Lost on reload (04 EA 02 08), profile switch or unplugging; never written to flash.
+RAM_EFFECT = 0x0C  # effect number and sub mode
+RAM_BLOCKS = {1: (0x0D, P_STATIC, 20), 2: (0x0E, P_BREATHING, 28), 3: (0x0F, P_PULSE, 57),
+              4: (0x10, P_SPIRAL, 51), 5: (0x11, P_WAVE, 51), 7: (0x12, P_TRIGGER, 51),
+              6: (0x13, P_STARS, 19), 16: (0x14, P_FADE, 20), 17: (0x15, P_ROWS, 45)}  # effect: block, profile offset, size
+# Report 6: colors per LED, shown until stopped: 06 EA 02 <01 show / 00 stop> 00 00 00 <checksum>,
+# then brightness, red, green, blue for each of 196 LED positions (keys, light bars, logo).
+LED_COUNT = 196
+
 E_KEYS = {"E1": 21, "E2": 43, "E3": 65, "E4": 82, "E5": 102}  # key positions
 
 # Key positions (index into a profile's key table), named after the US layout: the
@@ -127,6 +146,11 @@ FN = 108
 # recording macros (Alt), and F12; Unleash doesn't let their Fn layer change either.
 FN_RESERVED = {13, *range(23, 33), 96, 105, 107, 111, 112, 113}
 KEEP_ON_RESET = (104, FN)  # Unleash's key reset keeps the Win and Fn keys as they are
+LED_NAMES = {**KEY_POSITIONS, **{160 + i: f"LeftBar{i + 1}" for i in range(9)},
+             **{176 + i: f"RightBar{i + 1}" for i in range(9)}, **{192 + i: f"Logo{i + 1}" for i in range(4)}}
+LED_GROUPS = {"all": list(LED_NAMES), "keys": list(KEY_POSITIONS), "leftbar": list(range(160, 169)),
+              "rightbar": list(range(176, 185)), "bars": [*range(160, 169), *range(176, 185)],
+              "logo": list(range(192, 196))}
 
 HID_KEYS = {**{4 + i: chr(ord("A") + i) for i in range(26)},
             **{30 + i: str((i + 1) % 10) for i in range(10)},
@@ -208,6 +232,11 @@ def check_request(r):
         ok = ok and r[3] in GENERAL and (r[4] == READ or r[3] in GENERAL_WRITES)
     elif rid == 8:
         ok = ok and (r[3] == READ or (r[3] == WRITE and 1 <= r[4] <= 9 and r[7] == checksum(r)))
+    elif rid == 6:  # colors per LED: show them (with the checksum) or stop
+        ok = ok and r[3] in (0, 1) and r[4:7] == b"\0\0\0" and r[7] == checksum(r)
+    elif rid == 7:  # the active profile's lighting in RAM; its other blocks (sensor, keys) stay closed
+        ok = (ok and RAM_EFFECT <= r[3] <= max(b for b, _, _ in RAM_BLOCKS.values()) and r[5] == 0
+              and (r[4] == READ or r[4] == WRITE and r[7] == checksum(r)))
     elif rid == 9 and r[3] == WRITE:  # a macro: stored (status 1) or deleted (FF)
         ok = (ok and r[4] in MACRO_SLOTS and r[7] == checksum(r) and r[1031] in (1, 0xFF)
               and r[8] <= MACRO_NAME_MAX and r[62] | r[63] << 8 <= MACRO_DATA_MAX)
@@ -223,7 +252,7 @@ def check_answer(report, answer):
         raise Z20Error(f"the keyboard refused {bytes(report[:8]).hex(' ')}: {bytes(answer[:8]).hex(' ')}")
     # A read's answer repeats bytes 3-4: command and READ (report 4), or READ and the
     # profile or macro number. Writes are checked by reading back.
-    is_read = report[4] == READ if report[0] == 4 else report[3] == READ
+    is_read = report[4] == READ if report[0] in (4, 7) else report[3] == READ
     if is_read and answer[3:5] != report[3:5]:
         raise Z20Error(f"answer to another request: {bytes(answer[:8]).hex(' ')} for {bytes(report[:8]).hex(' ')}")
 
@@ -268,6 +297,30 @@ class Keyboard:
             raise Z20Error(f"keyboard: {e.strerror} (unplugged?)") from None
         check_answer(report, answer)
         return bytes(answer)
+
+    def send(self, request):
+        """Send a feature report the keyboard takes without an answer (live lighting), as
+        Unleash does: no read afterwards."""
+        report = bytearray(request).ljust(SIZES[request[0]], b"\0")
+        check_request(report)
+        try:
+            fcntl.ioctl(self.fd, ioc(0x06, len(report)), report, True)  # HIDIOCSFEATURE
+        except OSError as e:
+            raise Z20Error(f"keyboard: {e.strerror} (unplugged?)") from None
+        time.sleep(0.005)
+
+    def read_ram(self, block):
+        return self.call(bytes([7, *HEADER, block, READ]), 0.005)[8:]
+
+    def write_ram(self, block, data):
+        """Change a lighting block of the active profile in RAM and check it by reading it back."""
+        report = bytearray(SIZES[7])
+        report[:7] = bytes([7, *HEADER, block, WRITE, 0, 0])
+        report[8:8 + len(data)] = data
+        report[7] = checksum(report)
+        self.send(report)
+        if self.read_ram(block) != bytes(report[8:]):
+            raise Z20Error(f"the lighting in RAM (block {block:02x}) reads back different; z20 light reload")
 
     def general(self, command, sub=READ, value=0, wait=0.005):
         return self.call(bytes([4, *HEADER, command, sub, 0, 0, value]), wait)
@@ -605,6 +658,77 @@ def set_lighting(p, effect, colors, brightness, cycle):
     return p
 
 
+def with_ram_lighting(kb, p, effect):
+    """The stored profile p with the lighting in RAM over it: the effect number and the
+    settings of `effect` (a number), as far as the RAM has them."""
+    p = bytearray(p)
+    p[P_EFFECT:P_EFFECT + 2] = kb.read_ram(RAM_EFFECT)[:2]
+    if effect in RAM_BLOCKS:
+        block, at, size = RAM_BLOCKS[effect]
+        p[at:at + size] = kb.read_ram(block)[:size]
+    return p
+
+
+def live_lighting(kb, effect, colors, brightness, cycle):
+    """Change the active profile's lighting in RAM only: shown at once, gone on reload."""
+    stored = kb.read_profile(kb.profile_number())
+    mode = EFFECTS[effect]
+    before = with_ram_lighting(kb, stored, mode)
+    after = set_lighting(before, effect, colors, brightness, cycle)
+    if mode in RAM_BLOCKS:
+        block, at, size = RAM_BLOCKS[mode]
+        ram = bytearray(kb.read_ram(block))
+        ram[:size] = after[at:at + size]
+        kb.write_ram(block, ram)
+    ram = bytearray(kb.read_ram(RAM_EFFECT))
+    ram[:2] = after[P_EFFECT:P_EFFECT + 2]
+    kb.write_ram(RAM_EFFECT, ram)
+    return after
+
+
+def led_targets(text):
+    """LED positions from a comma list of LED names (keys, LeftBar1-9, RightBar1-9, Logo1-4)
+    and groups (all, keys, bars, leftbar, rightbar, logo)."""
+    by_name = {**KEY_BY_NAME, **{name.lower(): pos for pos, name in LED_NAMES.items()}}
+    out = []
+    for part in (s.strip().lower() for s in text.split(",")):
+        if part in LED_GROUPS:
+            out += LED_GROUPS[part]
+        elif part in by_name:
+            out.append(by_name[part])
+        else:
+            raise Z20Error(f"no LED {part} (key names, LeftBar1-9, RightBar1-9, Logo1-4, or all, keys, bars, logo)")
+    return out
+
+
+def color_frame(frame, pairs, brightness):
+    """The LED frame (196 x brightness, red, green, blue) with LEDS COLOR pairs applied."""
+    frame = bytearray(frame or bytes(LED_COUNT * 4))
+    level = 0xFF if brightness is None else round(brightness * 255 / 100)
+    for leds, color in pairs:
+        for pos in led_targets(leds):
+            frame[pos * 4:pos * 4 + 4] = bytes([level, *parse_color(color)])
+    return frame
+
+
+def color_report(frame):
+    report = bytearray(SIZES[6])
+    report[:4] = bytes([6, *HEADER, 1])  # 1: show these colors
+    report[8:8 + len(frame)] = frame
+    report[7] = checksum(report)
+    return report
+
+
+def colors_shown(frame):
+    """{"#rrggbb": [LED names]} of the LEDs that aren't dark."""
+    out = {}
+    for pos, name in LED_NAMES.items():
+        argb = frame[pos * 4:pos * 4 + 4]
+        if any(argb[1:]) and argb[0]:
+            out.setdefault(color_hex(argb), []).append(name)
+    return out
+
+
 def profile_name(p):
     length = p[P_NAME_LEN] | p[P_NAME_LEN + 1] << 8
     return p[P_NAME:P_NAME + min(2 * length, 126)].decode("utf-16-le", "replace")
@@ -723,7 +847,7 @@ def restore(kb, directory, profile=None, macro=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("status", "macros", "macro", "profile", "game-mode", "key", "light",
-                                            "backup", "restore"))
+                                            "color", "backup", "restore"))
     parser.add_argument("values", nargs="*", help="see above")
     parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
     parser.add_argument("--macro", type=int, choices=MACRO_SLOTS, metavar="N", help="restore: only macro N")
@@ -734,6 +858,7 @@ def main():
     parser.add_argument("--fn", action="store_true", help="key: its Fn layer")
     parser.add_argument("--brightness", type=int, choices=range(0, 101), metavar="P", help="percent")
     parser.add_argument("--cycle", type=int, metavar="MS", help="effect cycle in milliseconds")
+    parser.add_argument("--live", action="store_true", help="light: in RAM only, until z20 light reload")
     parser.add_argument("--json", action="store_true", help="print as JSON")
     args = parser.parse_intermixed_args()  # options may also stand between the values
     v = args.values
@@ -741,9 +866,13 @@ def main():
         parser.error("profile needs a number 1-9")
     if args.command == "game-mode" and (len(v) != 1 or v[0] not in ("on", "off", "toggle")):
         parser.error("game-mode needs on, off or toggle")
-    if args.command == "light" and v:
+    if args.live and (args.command != "light" or not v or v == ["reload"] or args.profile):
+        parser.error("--live: for z20 light EFFECT, on the active profile")
+    if args.command == "color" and v and v != ["off"] and (len(v) % 2 or not v):
+        parser.error("color: LEDS COLOR pairs, like: color w,a,s,d ff0000 all 000000; or color off")
+    if args.command == "light" and v and v != ["reload"]:
         if v[0] not in EFFECTS:
-            parser.error(f"light: one of {', '.join(EFFECTS)}")
+            parser.error(f"light: one of {', '.join(EFFECTS)}, or reload")
         wanted = {"static": (1, 1), "breathing": (1, 2)}.get(v[0], (0, 0))
         if not wanted[0] <= len(v) - 1 <= wanted[1]:
             parser.error(f"light {v[0]}: " + (f"needs {'one or two colors' if v[0] == 'breathing' else 'a color'}"
@@ -840,19 +969,55 @@ def main():
             elif len(v) == 1 or sys.stdout.isatty():
                 print(f"profile {n}: {label} {text}")
         elif args.command == "light":
-            n = args.profile or kb.profile_number()
+            active = kb.profile_number()
+            n = args.profile or active
+            if v == ["reload"]:
+                kb.general(0x08, WRITE, wait=0.1)  # RAM from flash: the stored lighting again
             p = kb.read_profile(n)
-            if v:
+            stored = lighting(p)
+            if v and v != ["reload"]:
                 colors = [parse_color(c) for c in v[1:]]
                 if v[0] == "breathing" and len(colors) == 1:
                     colors.append(b"\0\0\0")  # breathe out to dark
-                p = set_lighting(p, v[0], colors, args.brightness, args.cycle)
-                kb.write_profile(n, p)
+                if args.live:
+                    p = live_lighting(kb, v[0], colors, args.brightness, args.cycle)
+                else:
+                    p = set_lighting(p, v[0], colors, args.brightness, args.cycle)
+                    kb.write_profile(n, p)
+                    stored = lighting(p)
+            elif n == active:  # what is shown: RAM, which --live may have changed
+                p = with_ram_lighting(kb, p, kb.read_ram(RAM_EFFECT)[0])
             state = {"profile": n, **lighting(p)}
+            if n == active and state != {"profile": n, **stored}:
+                state.update(live=True, stored=stored)
             if args.json:
                 print(json.dumps(state))
+            elif not v or v == ["reload"] or sys.stdout.isatty():
+                print(f"profile {n}: {lighting_text(state)}" +
+                      (f" (live; stored: {lighting_text(stored)})" if state.get("live") else ""))
+        elif args.command == "color":
+            path = os.path.join(STATE, "colors.bin")
+            frame = None
+            if v == ["off"]:
+                kb.send(bytes([6, *HEADER, 0]))  # stop: the profile's lighting again
+                if os.path.exists(path):
+                    os.remove(path)
+            else:
+                if os.path.exists(path):
+                    with open(path, "rb") as f:
+                        frame = f.read()
+                if v:
+                    frame = color_frame(frame, list(zip(v[::2], v[1::2])), args.brightness)
+                    kb.send(color_report(frame))
+                    save(STATE, {"colors": frame})
+            shown = colors_shown(frame) if frame else {}
+            if args.json:
+                print(json.dumps({"on": frame is not None, "colors": shown}))
             elif not v or sys.stdout.isatty():
-                print(f"profile {n}: {lighting_text(state)}")
+                if frame is None:
+                    print("per-key colors: off (the profile's lighting shows)")
+                for color, names in shown.items():
+                    print(f"{color}  {', '.join(names)}")
         elif args.command == "backup":
             print(backup(kb))
         elif args.command == "restore":

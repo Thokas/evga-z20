@@ -100,6 +100,26 @@ same for lighting and checks the result by reading the profile back.
 | 1289  | effect's direction or sub mode |
 | 1320- | settings of every effect, see below |
 
+### Presence sensor
+
+Bytes 152-182 of a profile; 2-byte values little-endian. From Unleash's
+code and the profiles read; what the actions do hasn't been tried.
+
+| Bytes | Content | Profile 1 here |
+| ----- | ------- | -------------- |
+| 152 | on (1) / off (0) | on |
+| 153-154 | distance that counts as present, mm (Unleash shows cm) | 1200 |
+| 155-156 | time before "approaching" acts, ms | 0 |
+| 157-158 | when approaching: 0 turn on, 1 wake up, 2 unlock, `FFFF` nothing | nothing |
+| 159-160 | time before "leaving" acts (unit not known yet) | 10 |
+| 161-162 | when leaving: 0 turn off, 1 sleep, 2 lock, 3 dark, `FFFF` nothing | dark |
+| 163-178 | 4 gestures, each a key function | disabled |
+| 179-180 | welcome effect when approaching (effect number, sub mode) | 22, 0 |
+| 181-182 | welcome effect's length, ms | 5000 |
+
+The current distance: `04 EA 02 41 01`, answer bytes 7-8, mm (checked: 424
+with someone at the desk).
+
 ### Key functions
 
 4 bytes: function, then three parameters.
@@ -186,8 +206,40 @@ mode (trigger) into byte 1289 as well, and 0 for the others.
 
 Not found yet: where the brightness set with Fn + Up / Down is kept.
 
-Live effects and per-LED colors (reports 7 and 6, then `04 EA 02 12` to keep
-them) are what OpenRGB uses; see its `EVGAKeyboardController`.
+### Lighting in RAM (report 7)
+
+The active profile's lighting is also in RAM, block by block:
+`07 EA 02 <block> <00 write / 01 read> 00 <status> <checksum> <128 bytes>`.
+Block `0C` holds the effect number and its direction or sub mode; `0D`
+static, `0E` breathing, `0F` pulse, `10` spiral, `11` wave, `12` trigger,
+`13` stars, `14` fade, `15` by row hold each effect's settings in the same
+layout as in the profile, padded with zeros (checked: all nine read back
+equal to the stored profile). The checksum is the negated sum of the 128
+bytes. A read is answered like other commands (status `C0`); Unleash sends
+writes without reading an answer, and a read afterwards shows the new
+values. Writing `0C` and an effect block changes the lighting at once;
+`04 EA 02 08` (reload) brings back what is stored, and `04 EA 02 12`
+(save) would store the RAM instead. When a profile is loaded, the keyboard
+fills block `0C`'s second byte with the effect's direction (`02` for a wave
+to the right), where the stored profile may have `FF`.
+
+Blocks `03`-`0A` hold the presence sensor's settings (on, distance,
+approach time and action, leave time and action, welcome effect) and `0B`
+key functions; Unleash writes those, then saves.
+
+Report 7 with `00` or `01` in byte 3 is something else: Unleash's "sync"
+previews, which run an effect without touching the profile until
+`07 EA 02 00` ends them. `z20` doesn't use them.
+
+### Colors per LED (report 6)
+
+`06 EA 02 01 00 00 00 <checksum>`, then 196 × brightness, red, green, blue
+by LED position (the key positions above, the light bars 160-168 and
+176-184, the logo 192-195), shows those colors over the running lighting;
+`06 EA 02 00` ends that. The checksum is the negated sum of the 784 color
+bytes. Sent without reading an answer, as Unleash does for its software
+effects, which send a new frame for each step. Checked: one frame stays
+until it is ended.
 
 ## Reports 9 and 10: macros
 

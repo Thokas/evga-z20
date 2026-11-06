@@ -7,6 +7,8 @@ hidraw.
 
 - **Lighting per profile:** off, static, breathing, wave, spiral, pulse,
   stars, reactive and more, with color, brightness and speed
+- **Live lighting:** the same effects in RAM only (for scripts and widgets,
+  without wearing the flash), and colors per key, light bar LED and logo
 - **Profiles and Game Mode:** switch profiles 1–9, turn Game Mode on or off
 - **Backup and restore** of all nine profiles and the stored macros
 - **Keys:** see and change what any key does, also the macro keys E1–E5 and
@@ -62,6 +64,11 @@ z20 light wave | spiral | pulse | stars | reactive | fade | rows
 z20 light ... --profile N             another profile than the active one
 z20 light ... --brightness P          percent, for the effect's colors
 z20 light ... --cycle MS              length of one effect cycle (speed)
+z20 light static 0000ff --live        only in RAM: until reload, profile switch, unplugging
+z20 light reload                      back to the stored lighting
+z20 color all 000000 w,a,s,d ff0000   colors per LED over the lighting (later calls add);
+                                      also e1, LeftBar1-9, RightBar1-9, Logo1-4, keys, bars, logo
+z20 color off                         back to the profile's lighting
 z20 backup                            profiles 1-9 and macros to ~/.local/state/z20/backups/
 z20 restore DIR [--profile N | --macro N]
                                       write profiles and macros back from a backup
@@ -96,6 +103,16 @@ Lighting belongs to a profile: each of the nine profiles has its own effect
 and keeps settings for every effect, so `z20 light wave` switches back to the
 wave as it was set up (in Unleash or with the keyboard's Fn keys). `--json`
 output is meant for widgets and scripts.
+
+`z20 light` writes the profile to the keyboard's flash. For changes that
+come often (a widget, dimming when idle, showing a state) use `--live`: it
+changes only the RAM copy of the active profile, and `z20 light reload`,
+switching profiles or unplugging bring back what is stored. `z20 light`
+shows what is on and, after `--live`, what is stored. `z20 color` puts
+colors on single LEDs over whatever lighting runs, until `z20 color off`;
+it keeps the colors in `~/.local/state/z20/colors.bin`, so each call adds to
+the last one (`all 000000` starts from dark). The keyboard doesn't store
+them.
 
 Macro steps are written the way `z20 macros` prints them, separated by
 commas: `KEY down`, `KEY up`, `wait 20 ms`, `left button down`, `wheel up`,
@@ -171,8 +188,8 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 
 ## Not done yet
 
-- Colors per key and live effects; [OpenRGB](https://openrgb.org) already
-  does those for the Z20.
+- The presence sensor: its settings are known (PROTOCOL.md) and the live
+  distance can be read, but `z20` doesn't show or change them yet.
 - The brightness set with Fn + Up / Down: where the keyboard keeps it isn't
   known yet.
 
