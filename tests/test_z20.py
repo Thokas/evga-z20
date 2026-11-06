@@ -248,7 +248,7 @@ class PresenceService(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.state = {"org.mpris.MediaPlayer2.a": "Playing", "org.mpris.MediaPlayer2.b": "Paused"}
-                self.calls = []
+                self.calls, self.logged = [], []
 
             def query(self, *args):
                 if args[0] == "call":
@@ -257,6 +257,9 @@ class PresenceService(unittest.TestCase):
 
             def act(self, argv):
                 self.calls.append((argv[3], argv[-1]))
+
+            def log(self, text):
+                self.logged.append(text.split("  ", 1)[1])
 
         desktop = Desktop()
         desktop.do("pause-media")
@@ -267,6 +270,8 @@ class PresenceService(unittest.TestCase):
         desktop.calls = []
         desktop.do("resume-media")  # nothing paused any more
         self.assertEqual(desktop.calls, [])
+        self.assertEqual(desktop.logged, ["  pause-media: paused a", "  resume-media: resumed a",
+                                          "  resume-media: resumed nothing"])
 
 
 class Answers(unittest.TestCase):

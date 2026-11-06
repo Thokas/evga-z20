@@ -910,6 +910,7 @@ class Desktop:
         return shlex.split(self.query("get-property", player, *self.MPRIS, "PlaybackStatus"))[1:] == ["Playing"]
 
     def do(self, action):
+        """Carry out one action and log what it did."""
         if action == "lock":
             self.act(["loginctl", "lock-session"])
         elif action == "screen-off":
@@ -923,9 +924,14 @@ class Desktop:
             for player in self.paused:
                 self.act(["busctl", "--user", "call", player, *self.MPRIS, "Pause"])
         elif action == "resume-media":  # only what pause-media paused, if it is still there
-            for player in set(self.paused) & set(self.players()):
+            resume = sorted(set(self.paused) & set(self.players()))
+            for player in resume:
                 self.act(["busctl", "--user", "call", player, *self.MPRIS, "Play"])
             self.paused = []
+        names = lambda players: ", ".join(p.split(".", 3)[3] for p in players) or "nothing"
+        detail = {"pause-media": lambda: f"paused {names(self.paused)}",
+                  "resume-media": lambda: f"resumed {names(resume)}"}.get(action)
+        self.log(f"  {action}" + (f": {detail()}" if detail else ""))
 
     def run(self, command):
         self.act(["sh", "-c", command])
@@ -964,9 +970,10 @@ def presence(dry_run):
             desktop.log("keyboard back")
             trouble = None
         recent = (recent + [d])[-5:]  # the median of the last 2.5 s: single readings jump around
-        event = tracker.update(sorted(recent)[len(recent) // 2] < threshold, time.monotonic())
+        median = sorted(recent)[len(recent) // 2]
+        event = tracker.update(median < threshold, time.monotonic())
         if event:
-            desktop.log(f"{'left' if event == 'leave' else 'back'} ({d} mm, present within {threshold / 10:g} cm)")
+            desktop.log(f"{'left' if event == 'leave' else 'back'}: {median} mm (present within {threshold / 10:g} cm)")
             for action in cfg[event]:
                 desktop.do(action)
             if cfg[f"{event}_run"]:
