@@ -1,10 +1,24 @@
 # evga-z20
 
-`z20` sets up EVGA Z20 keyboards from Linux, without EVGA's Windows software
-(Unleash RGB): lighting, profiles, Game Mode and backups, and it shows what
-the macro keys E1-E5 do and which macros the keyboard keeps. One Python file,
-no packages; it talks to the keyboard over hidraw and leaves the kernel's
-keyboard driver alone.
+**evga-z20** sets up EVGA Z20 keyboards (Z20 and Z20 Elite, ANSI and ISO) on
+Linux, without EVGA's Windows software. It is a single Python file with no
+dependencies, and it talks to the keyboard's configuration interface over
+hidraw.
+
+- **Lighting per profile:** off, static, breathing, wave, spiral, pulse,
+  stars, reactive and more, with color, brightness and speed
+- **Profiles and Game Mode:** switch profiles 1–9, turn Game Mode on or off
+- **Backup and restore** of all nine profiles and the stored macros
+- **Readout** of what the macro keys E1–E5 do, and of every stored macro
+  step by step
+- **JSON output** for widgets and scripts
+
+Before every change it saves the old profile, and after the write it reads
+the profile back to check it. It never sends firmware, reset or
+factory-reset commands. [PROTOCOL.md](PROTOCOL.md) documents the
+configuration protocol, which was worked out from Unleash RGB for
+interoperability. Tested on a Z20 Elite ISO (firmware 1.38). Writing macros
+and per-key colors are not done yet.
 
 ## Keyboards
 
@@ -59,7 +73,7 @@ output is meant for widgets and scripts.
 ## Install
 
 ```
-git clone <this repository> && cd evga-z20
+git clone https://github.com/Thokas/evga-z20.git && cd evga-z20
 ./install.sh                     # z20 to ~/.local/bin
 # once, as root: let the logged-in user reach the keyboard's configuration interface
 sudo install -m644 udev/70-evga-z20.rules /etc/udev/rules.d/
