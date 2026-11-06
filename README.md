@@ -11,15 +11,14 @@ hidraw.
 - **Backup and restore** of all nine profiles and the stored macros
 - **Macro keys E1–E5:** see and change what they do (a stored macro once,
   N times, toggled or held; a key combination, media key, click, profile)
-- **Readout** of every stored macro, step by step
+- **Macros:** list them step by step; create, edit, rename and delete them
 - **JSON output** for widgets and scripts
 
-Before every change it saves the old profile, and after the write it reads
-the profile back to check it. It never sends firmware, reset or
-factory-reset commands. [PROTOCOL.md](PROTOCOL.md) documents the
-configuration protocol, which was worked out from Unleash RGB for
-interoperability. Tested on a Z20 Elite ISO (firmware 1.38). Creating and
-editing macros and per-key colors are not done yet.
+Before every change it saves what it replaces, and after the write it reads
+it back to check it. It never sends firmware, reset or factory-reset
+commands. [PROTOCOL.md](PROTOCOL.md) documents the configuration protocol,
+which was worked out from Unleash RGB for interoperability. Tested on a Z20
+Elite ISO (firmware 1.38). Per-key colors are not done yet.
 
 ## Keyboards
 
@@ -39,6 +38,9 @@ TKL, Z15 and Z12 use other code and aren't supported.
 ```
 z20 status [--json]                   profile, Game Mode, lighting, E1-E5, macro names
 z20 macros [--json]                   stored macros, step by step
+z20 macro new Hi "LShift down, H, LShift up, I"
+                                      store a macro in a free slot (prints its number)
+z20 macro edit 5 "ctrl down, c, ctrl up" | rename 5 Copy | delete 5
 z20 profile N                         switch to profile 1-9 (also Fn + 1-9)
 z20 game-mode on | off | toggle
 z20 key E4                            what macro key E4 does
@@ -58,7 +60,8 @@ z20 light ... --profile N             another profile than the active one
 z20 light ... --brightness P          percent, for the effect's colors
 z20 light ... --cycle MS              length of one effect cycle (speed)
 z20 backup                            profiles 1-9 and macros to ~/.local/state/z20/backups/
-z20 restore DIR [--profile N]         write profiles back from a backup
+z20 restore DIR [--profile N | --macro N]
+                                      write profiles and macros back from a backup
 ```
 
 ```
@@ -77,6 +80,18 @@ Lighting belongs to a profile: each of the nine profiles has its own effect
 and keeps settings for every effect, so `z20 light wave` switches back to the
 wave as it was set up (in Unleash or with the keyboard's Fn keys). `--json`
 output is meant for widgets and scripts.
+
+Macro steps are written the way `z20 macros` prints them, separated by
+commas: `KEY down`, `KEY up`, `wait 20 ms`, `left button down`, `wheel up`,
+`playpause down`, `mouse to X Y`. A key, `left click` or media key on its
+own is pressed and let go. Keys go by the names `z20 macros` shows (`A`,
+`LShift`, `Enter`, `F14`, `Comma`, ...); they are positions on the keyboard,
+so the layout set on the computer decides the character (Z gives "y" on a
+German layout). Every step gets a short wait before it (2.5 ms if none is
+given, as Unleash does): steps without one would merge, and a key pressed and
+let go in the same instant never shows. Add longer waits for programs that
+miss fast input. The run mode (once, N times, toggled, held) belongs to the
+key: `z20 key E4 macro 5 --repeat 3`.
 
 To use E1-E5 as desktop shortcuts, give them keys no keyboard has, like
 `z20 key E4 key f14`, and bind those in the desktop's shortcut settings.
@@ -104,10 +119,11 @@ root-only.
 - `z20` only sends commands from a fixed list and refuses anything else. The
   keyboard also knows reset, erase firmware, bootloader and factory reset
   commands: those never go out (`tests/` checks this).
-- Before a profile is written, the profile as it was goes to
+- Before a profile or macro is written, what it replaces goes to
   `~/.local/state/z20/previous/`; afterwards it is read back and compared.
   `z20 restore ~/.local/state/z20/previous` undoes the last change.
-- Macros are only read so far; `z20 key` changes only the key you name.
+- `z20 key` changes only the key you name; `z20 macro delete` refuses a
+  macro that a key in any profile still runs.
 - The firmware is never touched; leave updates to Unleash RGB.
 - Backups and `previous/` are readable by you only: macros can hold
   anything that was typed while recording them.
@@ -139,8 +155,7 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 
 ## Not done yet
 
-- Writing macros (creating and editing them; the format is known, see
-  PROTOCOL.md), and `z20 key` for keys other than E1-E5.
+- `z20 key` for keys other than E1-E5 (PROTOCOL.md lists their positions).
 - Colors per key and live effects; [OpenRGB](https://openrgb.org) already
   does those for the Z20.
 - The brightness set with Fn + Up / Down: where the keyboard keeps it isn't

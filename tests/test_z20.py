@@ -71,11 +71,26 @@ class Requests(unittest.TestCase):
             with self.assertRaises(z20.Z20Error):
                 z20.check_request(p)
 
-    def test_macros_are_only_read(self):
+    def test_macro_writes_need_a_slot_the_checksum_and_sane_lengths(self):
         z20.check_request(report(9, 0xEA, 0x02, z20.READ, 0, 0, z20.FAIL))
         z20.check_request(report(10, 0xEA, 0x02, z20.READ, 3, 0, z20.FAIL))
-        with self.assertRaises(z20.Z20Error):
-            z20.check_request(report(9, 0xEA, 0x02, z20.WRITE, 3, 0, z20.FAIL))
+
+        def macro(n, status=1, name_len=2, data_len=3):
+            r = report(9, 0xEA, 0x02, z20.WRITE, n, 0, z20.FAIL)
+            r[8], r[9:11] = name_len, b"Hi"
+            r[62:64], r[64:67], r[1031] = data_len.to_bytes(2, "little"), b"\x0b\x8b\x0c", status
+            r[7] = z20.checksum(r)
+            return r
+
+        z20.check_request(macro(5))
+        z20.check_request(macro(100, status=0xFF))
+        bad = macro(5)
+        bad[7] ^= 1
+        for r in (bad, macro(0), macro(101), macro(5, status=0), macro(5, name_len=51), macro(5, data_len=967)):
+            with self.assertRaises(z20.Z20Error):
+                z20.check_request(r)
+        with self.assertRaises(z20.Z20Error):  # names are only read
+            z20.check_request(report(10, 0xEA, 0x02, z20.WRITE, 3, 0, z20.FAIL))
 
 
 class Answers(unittest.TestCase):
@@ -105,7 +120,33 @@ class Reports(unittest.TestCase):
                       0x70, 0xF0, 0x78, 0xF8, 0x80, 0x10, 0x00, 0x20, 0x00])
         self.assertEqual(z20.macro_actions(data), [
             "wait 20 ms", "W down", "W up", "left button down", "left button up", "VolumeUp down",
-            "media up", "LCtrl down", "LCtrl up", "wheel down", "wheel up", "mouse to 16,32"])
+            "media up", "LCtrl down", "LCtrl up", "wheel down", "wheel up", "mouse to 16 32"])
+
+    def test_steps_read_back_as_written(self):
+        # each step after a wait, as Unleash writes them: W, left button, VolumeUp, LCtrl, wheel,
+        # mouse to 16 32, Comma, KPPlus, F14, KP7, RGUI
+        steps = [[0x1A], [0x9A], [0x7A], [0xFA], [0x03, 0xE9, 0x00], [0x03, 0, 0], [0x70], [0xF0], [0x78],
+                 [0xF8], [0x80, 0x10, 0x00, 0x20, 0x00], [0x36], [0xB6], [0x57], [0xD7], [0x69], [0xE9],
+                 [0x5F], [0xDF], [0x77], [0xF7]]
+        data = b"".join(bytes([0x01, 39 if i % 2 else 4, 0, *s]) for i, s in enumerate(steps))
+        self.assertEqual(z20.parse_steps(", ".join(z20.macro_actions(data))), data)
+
+    def test_steps(self):
+        def steps(text):  # what parse_steps gives, without the 2.5 ms waits it puts before each step
+            return z20.parse_steps(text).replace(z20.MACRO_GAP, b"")
+
+        self.assertEqual(z20.parse_steps("H"), bytes([0x01, 4, 0, 0x0B, 0x01, 4, 0, 0x8B]))
+        self.assertEqual(z20.parse_steps("wait 20, H down"), bytes([0x01, 39, 0, 0x0B]))
+        self.assertEqual(steps("LShift down, H, LShift up, I"), bytes([0x71, 0x0B, 0x8B, 0xF1, 0x0C, 0x8C]))
+        self.assertEqual(steps("ctrl down, c, ctrl up"), bytes([0x70, 0x06, 0x86, 0xF0]))
+        self.assertEqual(steps("left click, wait 2.5 ms, right button down"), bytes([0x7A, 0xFA, 0x7B]))
+        self.assertEqual(steps("playpause"), bytes([0x03, 0xCD, 0x00, 0x03, 0x00, 0x00]))
+        self.assertEqual(steps("wait 0.5"), bytes([0x01, 0, 0]))
+        self.assertEqual(steps("wait 40000"), bytes([0x01, 0xFF, 0xFF, 0x01, 0x7F, 0x38]))  # 32768 + 7232 ms
+        for bad in ("", "W,, E", "wait 0", "wait x", "f21", "wheel", "media down", "nosuchkey down",
+                    "mouse to 1 2 3", "key 0x01", ", ".join(["W"] * 500)):
+            with self.assertRaises(z20.Z20Error, msg=bad):
+                steps(bad)
 
     def test_key_functions(self):
         names = {1: "Autorunner"}

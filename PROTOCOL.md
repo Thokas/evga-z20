@@ -211,9 +211,18 @@ Data, one step after another:
 | `03 lo hi` | media key down (consumer usage); `03 00 00` up |
 | `80 x x y y` | move the mouse to x, y |
 
-Writing (from Unleash's code, not tried yet): the same report with byte 3
-`00`, byte 6 `C1`, the checksum, status 1; deleting: status `FF` and both
-lengths 0. A macro is put on a key with a key function `03`.
+Unleash puts a wait before every step: where it recorded none, `01 04 00`
+(2.5 ms). The keyboard needs that: it reports its keys at a fixed rate, and
+steps without a wait between them merge. Checked: "LShift down, H down, H up,
+LShift up, I down, I up" without waits typed Shift + H with the Shift let go
+first and no "i" at all; with 2.5 ms before each step it typed "Hi".
+
+Writing (checked): the same report with byte 3 `00`, byte 6 `C1`, the
+checksum and status 1; bytes 59-61 and everything after the data stay 0, as
+in the macros Unleash stores. Reading the macro back gives exactly what was
+written. Deleting: status `FF`, both lengths 0; the slot table then shows the
+slot free (`FF`). A macro is put on a key with a key function `03`. Unleash
+tells macros apart by name, so names should be unique.
 
 ## Checksums
 

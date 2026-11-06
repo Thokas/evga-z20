@@ -3,6 +3,11 @@
 
   z20 status [--json]                   profile, Game Mode, lighting, E1-E5, macro names
   z20 macros [--json]                   stored macros with what they do
+  z20 macro new NAME STEPS              store a macro in a free slot, like
+                                        z20 macro new Hi "LShift down, H, LShift up, I"
+  z20 macro edit N STEPS | rename N NAME | delete N
+                                        STEPS as z20 macros prints them; a key, "left click"
+                                        or media key alone is pressed and let go
   z20 profile N                         switch to profile 1-9
   z20 game-mode on | off | toggle
   z20 key E1-E5 [--json]                what the macro key does
@@ -20,7 +25,9 @@
   z20 light ... --brightness P          percent (0-100) for the effect's colors
   z20 light ... --cycle MS              length of one effect cycle (speed)
   z20 backup                            copy profiles 1-9 and the macros to ~/.local/state/z20/backups/
-  z20 restore DIR [--profile N]         write profiles back from a backup (all in DIR, or N)
+  z20 restore DIR [--profile N | --macro N]
+                                        write profiles and macros back from a backup (all in DIR,
+                                        or one); DIR ~/.local/state/z20/previous undoes the last change
 
 COLOR is rrggbb or #rrggbb. Talks to the keyboard's configuration interface
 (USB interface 1) over /dev/hidraw* the way EVGA's Unleash RGB does: a
@@ -94,11 +101,11 @@ E_KEYS = {"E1": 21, "E2": 43, "E3": 65, "E4": 82, "E5": 102}  # key positions
 HID_KEYS = {**{4 + i: chr(ord("A") + i) for i in range(26)},
             **{30 + i: str((i + 1) % 10) for i in range(10)},
             40: "Enter", 41: "Esc", 42: "Backspace", 43: "Tab", 44: "Space", 45: "-", 46: "=",
-            47: "[", 48: "]", 49: "\\", 50: "#", 51: ";", 52: "'", 53: "`", 54: ",", 55: ".",
+            47: "[", 48: "]", 49: "\\", 50: "#", 51: ";", 52: "'", 53: "`", 54: "Comma", 55: ".",
             56: "/", 57: "CapsLock", **{58 + i: f"F{i + 1}" for i in range(12)}, 70: "PrintScreen",
             71: "ScrollLock", 72: "Pause", 73: "Insert", 74: "Home", 75: "PageUp", 76: "Delete",
             77: "End", 78: "PageDown", 79: "Right", 80: "Left", 81: "Down", 82: "Up", 83: "NumLock",
-            84: "KP/", 85: "KP*", 86: "KP-", 87: "KP+", 88: "KPEnter",
+            84: "KP/", 85: "KP*", 86: "KP-", 87: "KPPlus", 88: "KPEnter",  # no "," or "+": they separate
             **{89 + i: f"KP{i + 1}" for i in range(9)}, 98: "KP0", 99: "KP.", 100: "ISO\\", 101: "Menu",
             **{0x68 + i: f"F{13 + i}" for i in range(12)}}  # F13-F24: free for desktop shortcuts
 MODIFIERS = ["LCtrl", "LShift", "LAlt", "LGUI", "RCtrl", "RShift", "RAlt", "RGUI"]
@@ -122,6 +129,16 @@ MODIFIER_BITS = {"ctrl": 0x01, "lctrl": 0x01, "shift": 0x02, "lshift": 0x02, "al
                  "ralt": 0x40, "altgr": 0x40, "rsuper": 0x80, "rgui": 0x80}
 MEDIA = {**{name.lower(): usage for usage, name in CONSUMER.items()},
          "next": 0xB5, "previous": 0xB6, "prev": 0xB6, "volume-up": 0xE9, "volume-down": 0xEA}
+
+# Macros: keys by name (modifiers are 0x70-0x77 in macro data), mouse buttons, limits.
+# (F21-F24 have the modifiers' codes, so a macro can't type them.)
+MACRO_KEYS = {**{name: usage for name, usage in KEY_USAGES.items() if usage < 0x70},
+              **{name: 0x6F + bit.bit_length() for name, bit in MODIFIER_BITS.items()}}
+BUTTONS = {"left": 0x7A, "right": 0x7B, "middle": 0x7C}
+MACRO_DATA_MAX = 966  # Unleash keeps the last of the 967 bytes free
+MACRO_GAP = b"\x01\x04\x00"  # wait 2.5 ms: what Unleash puts before a step recorded without a wait
+MACRO_NAME_MAX = 50
+MACRO_SLOTS = range(1, 101)
 
 
 class Z20Error(Exception):
@@ -161,8 +178,11 @@ def check_request(r):
         ok = ok and r[3] in GENERAL and (r[4] == READ or r[3] in GENERAL_WRITES)
     elif rid == 8:
         ok = ok and (r[3] == READ or (r[3] == WRITE and 1 <= r[4] <= 9 and r[7] == checksum(r)))
+    elif rid == 9 and r[3] == WRITE:  # a macro: stored (status 1) or deleted (FF)
+        ok = (ok and r[4] in MACRO_SLOTS and r[7] == checksum(r) and r[1031] in (1, 0xFF)
+              and r[8] <= MACRO_NAME_MAX and r[62] | r[63] << 8 <= MACRO_DATA_MAX)
     else:
-        ok = ok and r[3] == READ  # macros: reading only, so far
+        ok = ok and r[3] == READ  # macro reads; macro names (report 10) are only read
     if not ok:
         raise Z20Error(f"refusing to send {bytes(r[:8]).hex(' ')}")
 
@@ -188,6 +208,17 @@ class Keyboard:
         # One z20 at a time (a widget may poll while a command runs): the keyboard keeps a
         # single answer per report, which a second request in between would replace.
         fcntl.flock(self.fd, fcntl.LOCK_EX)
+        self.changed = False  # previous/ is emptied before this run's first change
+
+    def save_previous(self, reports):
+        """Keep what a change replaces in previous/, which holds the last run's changes only:
+        `z20 restore ~/.local/state/z20/previous` undoes them."""
+        directory = os.path.join(STATE, "previous")
+        if not self.changed:
+            for old in glob.glob(os.path.join(directory, "*.bin")):
+                os.remove(old)
+            self.changed = True
+        save(directory, reports)
 
     def close(self):
         os.close(self.fd)
@@ -242,12 +273,12 @@ class Keyboard:
         if len(profile) != SIZES[8] or profile[1:3] != HEADER:
             raise Z20Error(f"not a profile: {bytes(profile[:8]).hex(' ')}")
         old = self.read_profile(n)
-        save(os.path.join(STATE, "previous"), {f"profile-{n}": old})
         report = bytearray(profile)
         report[3], report[4] = WRITE, n
         report[7] = checksum(report)
         if report[8:] == old[8:]:
             return
+        self.save_previous({f"profile-{n}": old})
         self.call(report, 0.1)
         if self.read_profile(n)[8:] != report[8:]:
             raise Z20Error(f"profile {n} reads back different from what was written; "
@@ -265,6 +296,38 @@ class Keyboard:
 
     def read_macro(self, n):
         return self.call(bytes([9, *HEADER, READ, n, 0, FAIL]), 0.15)
+
+    def write_macro(self, n, name, data):
+        """Store a macro in slot n as Unleash does (run mode, repeat count and time unit
+        stay 0: the key decides how it runs) and check it by reading it back."""
+        raw = name.encode()
+        report = bytearray(SIZES[9])
+        report[:7] = bytes([9, *HEADER, WRITE, n, 0, FAIL])
+        report[8], report[9:9 + len(raw)] = len(raw), raw
+        report[62:64] = len(data).to_bytes(2, "little")
+        report[64:64 + len(data)] = data
+        report[1031] = 1  # in use
+        self.put_macro(n, report)
+
+    def delete_macro(self, n):
+        report = bytearray(SIZES[9])
+        report[:7] = bytes([9, *HEADER, WRITE, n, 0, FAIL])
+        report[1031] = 0xFF  # free; name and data lengths 0
+        self.put_macro(n, report)
+
+    def put_macro(self, n, report):
+        """Send a macro report (to store or delete), the old macro saved to previous/ first."""
+        report[3], report[4], report[6] = WRITE, n, FAIL
+        report[7] = checksum(report)
+        if n in self.macro_slots():
+            self.save_previous({f"macro-{n:03}": self.read_macro(n)})
+        self.call(report, 0.15)
+        if report[1031] == 0xFF:
+            if n in self.macro_slots():
+                raise Z20Error(f"macro {n} is still there after deleting it")
+        elif self.read_macro(n)[7:] != report[7:]:
+            raise Z20Error(f"macro {n} reads back different from what was written; "
+                           f"the old one is in {STATE}/previous (z20 restore {STATE}/previous)")
 
 
 def save(directory, reports):
@@ -339,6 +402,71 @@ def parse_function(words, macro_slots, run):
     raise Z20Error(f"unknown key function: {' '.join(words)}")
 
 
+def parse_steps(text):
+    """Macro data from steps as `z20 macros` prints them, like "LShift down, W, wait 20 ms,
+    LShift up". A key, click ("left click") or media key without down / up is pressed and
+    let go; "wait N" (ms) takes half milliseconds.
+
+    Every step gets a wait before it, 2.5 ms where none is given, as Unleash writes them:
+    the keyboard reports its keys at a fixed rate, and steps within one report merge (a key
+    pressed and let go without a wait never shows)."""
+    data = bytearray()
+    waited = False
+
+    def step_bytes(b):
+        nonlocal waited
+        if not waited:
+            data.extend(MACRO_GAP)
+        data.extend(b)
+        waited = False
+
+    for step in (s.strip() for s in text.split(",")):
+        words = step.lower().split()
+        if not words:
+            raise Z20Error(f"empty step in: {text}")
+        if words[0] == "wait" and len(words) in (2, 3) and words[2:] in ([], ["ms"]):
+            try:
+                half = round(float(words[1]) * 2)  # stored as half milliseconds - 1
+            except ValueError:
+                half = 0
+            if not 1 <= half <= 1_200_000:
+                raise Z20Error(f"not a wait of 0.5 ms to 10 minutes: {step}")
+            while half:
+                part = min(half, 0x10000)
+                data += bytes([0x01, (part - 1) & 0xFF, (part - 1) >> 8])
+                half -= part
+            waited = True
+            continue
+        if words[:2] == ["mouse", "to"] and len(words) == 4 and all(w.isdigit() and int(w) < 0x10000 for w in words[2:]):
+            x, y = int(words[2]), int(words[3])
+            step_bytes(bytes([0x80, x & 0xFF, x >> 8, y & 0xFF, y >> 8]))
+            continue
+        if words[-1] in ("down", "up") and len(words) > 1:
+            name, presses = " ".join(words[:-1]), [words[-1] == "up"]
+        else:
+            name, presses = " ".join(words), [False, True]  # press and let go
+        if name in ("left click", "right click", "middle click") and len(presses) == 2:
+            name = name.split()[0] + " button"
+        for up in presses:
+            if name == "wheel" and len(presses) == 1:
+                step_bytes([0xF8 if up else 0x78])  # "wheel up" / "wheel down" scroll
+            elif name.endswith(" button") and name.split()[0] in BUTTONS and len(name.split()) == 2:
+                step_bytes([BUTTONS[name.split()[0]] | (0x80 if up else 0)])
+            elif name in MEDIA or re.fullmatch(r"media 0x[0-9a-f]{1,3}", name) or name == "media" and up:
+                usage = 0 if up else MEDIA.get(name) or int(name.split()[-1], 16)
+                step_bytes([0x03, usage & 0xFF, usage >> 8])
+            elif name in MACRO_KEYS or re.fullmatch(r"key 0x(0[4-9a-f]|[1-6][0-9a-f]|7[0-7])", name):
+                code = MACRO_KEYS.get(name) or int(name.split()[-1], 16)
+                step_bytes([code | (0x80 if up else 0)])
+            else:
+                raise Z20Error(f"unknown macro step: {step}")
+    if not data:
+        raise Z20Error("a macro needs at least one step")
+    if len(data) > MACRO_DATA_MAX:
+        raise Z20Error(f"macro too long: {len(data)} bytes, the keyboard keeps {MACRO_DATA_MAX}")
+    return bytes(data)
+
+
 def macro_actions(data):
     """The steps of a macro's data: waits, keys and mouse buttons down / up, and so on."""
     out, i = [], 0
@@ -353,7 +481,7 @@ def macro_actions(data):
             out.append(f"{CONSUMER.get(usage, f'media 0x{usage:03x}')} down" if usage else "media up")
             i += 3
         elif b == 0x80:
-            out.append(f"mouse to {data[i + 1] | data[i + 2] << 8},{data[i + 3] | data[i + 4] << 8}")
+            out.append(f"mouse to {data[i + 1] | data[i + 2] << 8} {data[i + 3] | data[i + 4] << 8}")
             i += 5
         elif b & 0x7F == 0x78:
             out.append("wheel " + ("up" if b & 0x80 else "down"))
@@ -455,30 +583,82 @@ def backup(kb):
     return directory
 
 
-def restore(kb, directory, only):
-    done = []
-    for n in [only] if only else range(1, 10):
-        path = os.path.join(directory, f"profile-{n}.bin")
-        if not os.path.exists(path):
-            if only:
-                raise Z20Error(f"no profile {n} in {directory}")
+def macro_users(kb, n):
+    """The keys in profiles 1-9 (either layer) that run macro n."""
+    labels = {pos: label for label, pos in E_KEYS.items()}
+    users = []
+    for p in range(1, 10):
+        profile = kb.read_profile(p)
+        for layer, base in (("", P_KEYS), ("Fn+", P_FN_KEYS)):
+            for pos in range(121):
+                if profile[base + pos * 4] == 3 and profile[base + pos * 4 + 1] == n:
+                    users.append(f"profile {p} {layer}{labels.get(pos, f'key {pos}')}")
+    return users
+
+
+def change_macro(kb, v):
+    """z20 macro new NAME STEPS | edit N STEPS | rename N NAME | delete N: (number, name, data)."""
+    slots = kb.macro_slots()
+    if v[0] == "new":
+        n = next((m for m in MACRO_SLOTS if m not in slots), None)
+        if n is None:
+            raise Z20Error("all 100 macro slots are in use")
+        name, data = v[1], parse_steps(" ".join(v[2:]))
+    else:
+        n = int(v[1])
+        if n not in slots:
+            raise Z20Error(f"no macro {n} on the keyboard (z20 macros lists them)")
+        old = kb.read_macro(n)
+        name = v[2] if v[0] == "rename" else old[9:9 + min(old[8], MACRO_NAME_MAX)].decode("utf-8", "replace")
+        data = parse_steps(" ".join(v[2:])) if v[0] == "edit" else old[64:64 + (old[62] | old[63] << 8)]
+    if v[0] in ("new", "rename") and any(kb.macro_name(m) == name for m in slots if m != n):
+        raise Z20Error(f"there is a macro \"{name}\" already (Unleash tells macros apart by name)")
+    if v[0] == "delete":
+        users = macro_users(kb, n)
+        if users:
+            raise Z20Error(f"macro {n} is on {', '.join(users)}: put something else there first (z20 key)")
+        kb.delete_macro(n)
+    else:
+        kb.write_macro(n, name, data)
+    return n, name, data
+
+
+def restore(kb, directory, profile=None, macro=None):
+    """Write profiles and macros back from a backup or previous/: all it holds, or one."""
+    if profile or macro:
+        files = [f"profile-{profile}.bin" if profile else f"macro-{macro:03}.bin"]
+    else:
+        files = sorted(os.listdir(directory))
+    items = []  # read everything first: writing empties previous/, which may be the directory
+    for file in files:
+        found = re.fullmatch(r"(profile|macro)-(\d+)\.bin", file)
+        path = os.path.join(directory, file)
+        if not found:
             continue
+        if not os.path.exists(path):
+            raise Z20Error(f"no {file} in {directory}")
         with open(path, "rb") as f:
-            p = f.read()
-        if len(p) != SIZES[8] or p[4] != n or p[7] != checksum(p):
-            raise Z20Error(f"{path} is not a good copy of profile {n}")
-        kb.write_profile(n, p)
-        done.append(n)
-    if not done:
-        raise Z20Error(f"no profiles in {directory}")
-    return done
+            data = f.read()
+        kind, n = found.group(1), int(found.group(2))
+        good = (len(data) == SIZES[8] and 1 <= n <= 9) if kind == "profile" else \
+               (len(data) == SIZES[9] and n in MACRO_SLOTS and data[1031] == 1)
+        if not good or data[1:3] != HEADER or data[4] != n or data[7] != checksum(data):
+            raise Z20Error(f"{path} is not a good copy of {kind} {n}")
+        items.append((kind, n, data))
+    if not items:
+        raise Z20Error(f"nothing to restore in {directory}")
+    for kind, n, data in items:
+        kb.write_profile(n, data) if kind == "profile" else kb.put_macro(n, bytearray(data))
+    return [f"{kind} {n}" for kind, n, _ in items]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("status", "macros", "profile", "game-mode", "key", "light", "backup", "restore"))
+    parser.add_argument("command", choices=("status", "macros", "macro", "profile", "game-mode", "key", "light",
+                                            "backup", "restore"))
     parser.add_argument("values", nargs="*", help="see above")
     parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
+    parser.add_argument("--macro", type=int, choices=MACRO_SLOTS, metavar="N", help="restore: only macro N")
     run = parser.add_mutually_exclusive_group()
     run.add_argument("--toggle", action="store_true", help="key macro: run until the key is pressed again")
     run.add_argument("--hold", action="store_true", help="key macro: run while the key is held")
@@ -505,6 +685,15 @@ def main():
             parser.error("key: E1, E2, E3, E4 or E5")
         if (args.toggle or args.hold or args.repeat) and v[1:2] != ["macro"]:
             parser.error("--toggle, --hold and --repeat are for macros")
+    if args.command == "macro":
+        least = {"new": 3, "edit": 3, "rename": 3, "delete": 2}
+        if not v or v[0] not in least or len(v) < least[v[0]] or v[0] in ("rename", "delete") and len(v) != least[v[0]]:
+            parser.error("macro new NAME STEPS | edit N STEPS | rename N NAME | delete N")
+        if v[0] != "new" and not (v[1].isdigit() and int(v[1]) in MACRO_SLOTS):
+            parser.error("macro: a number 1-100 (z20 macros lists them)")
+        name = {"new": v[1], "rename": v[-1]}.get(v[0])
+        if name is not None and not 0 < len(name.encode()) <= MACRO_NAME_MAX:
+            parser.error(f"macro name: 1 to {MACRO_NAME_MAX} bytes")
     if args.command == "restore" and len(v) != 1:
         parser.error("restore needs a backup directory")
 
@@ -531,6 +720,14 @@ def main():
             for n, m in ([] if args.json else ms.items()):
                 print(f"{n:>3} \"{m['name']}\"")
                 print("      " + ", ".join(m["actions"]))
+        elif args.command == "macro":
+            n, name, data = change_macro(kb, v)
+            if v[0] == "delete":
+                print(json.dumps({"macro": n, "deleted": True}) if args.json else f"deleted macro {n}")
+            else:
+                steps = macro_actions(data)
+                print(json.dumps({"macro": n, "name": name, "actions": steps}) if args.json
+                      else f"macro {n} \"{name}\": {', '.join(steps)}")
         elif args.command == "profile":
             kb.set_profile(int(v[0]))
         elif args.command == "game-mode":
@@ -578,8 +775,7 @@ def main():
         elif args.command == "backup":
             print(backup(kb))
         elif args.command == "restore":
-            done = restore(kb, os.path.expanduser(v[0]), args.profile)
-            print(f"restored profile{'s' if len(done) > 1 else ''} {', '.join(map(str, done))}")
+            print("restored " + ", ".join(restore(kb, os.path.expanduser(v[0]), args.profile, args.macro)))
     finally:
         kb.close()
     return 0
