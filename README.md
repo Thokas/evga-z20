@@ -109,7 +109,8 @@ z20 sensor welcome thunder 3000       effect when you come (fade, rows, explosio
                                       barber, lightbar, thunder) and its length in ms
 z20 events [--json] [--wait S]        what the keyboard reports itself (profile, effect and
                                       Game Mode changed with its keys, media keys); with
-                                      --wait only the first event within S seconds
+                                      --wait only the first event within S seconds,
+                                      media keys left out
 z20 presence [--dry-run]              lock, pause media, screen off ... when you leave
 z20 presence settings [--json]        what it does: presence.ini with its defaults
                                       (a service, see Presence service)

@@ -76,7 +76,7 @@
                                         away-light "animate fire", ...); the rest stays as it is
   z20 events [--json] [--wait S]        what the keyboard reports on its own: profile, effect and
                                         Game Mode changed with its keys, media keys (until Ctrl+C,
-                                        or only the first event within S seconds)
+                                        or only the first event within S seconds but media keys)
   z20 backup                            copy profiles 1-9 and the macros to ~/.local/state/z20/backups/
   z20 restore DIR [--profile N | --macro N]
                                         write profiles and macros back from a backup (all in DIR,
@@ -964,6 +964,16 @@ def set_presence(changes, path=PRESENCE_CONFIG):
     """Change settings of presence.ini's [presence] section, [(key, value)] with the keys of
     PRESENCE_DEFAULTS, and keep the rest of the file (comments, other settings) as it is. An
     empty value stays in the file: "leave =" means nothing, while no "leave" means the default."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lock = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # one change at a time, each on top of the last
+        _set_presence(changes, path)
+    finally:
+        os.close(lock)
+
+
+def _set_presence(changes, path):
     try:
         with open(path) as f:
             lines = f.read().splitlines()
@@ -995,7 +1005,6 @@ def set_presence(changes, path=PRESENCE_CONFIG):
         lines[at] = f"{key} = {value.strip()}".rstrip()
     text = "\n".join(lines) + "\n"
     presence_config(path, text)  # raises before anything is written
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:  # in place: a symlinked file stays one
         f.write(text)
 
@@ -1727,7 +1736,8 @@ def keyboard_event(data):
 def watch_events(as_json, wait=None):
     """Print what the keyboard reports on interface 1 until Ctrl+C; waits while it is unplugged.
     With wait, only the first event within that many seconds, then it ends (a widget runs it
-    again and again). Only reads input reports, so it needs no lock and sends nothing."""
+    again and again); media keys don't count there, since every volume step sends some and they
+    change nothing on the keyboard. Only reads input reports, so it needs no lock and sends nothing."""
     deadline = None if wait is None else time.monotonic() + wait
     left = lambda: None if deadline is None else deadline - time.monotonic()
     trouble = None
@@ -1747,7 +1757,7 @@ def watch_events(as_json, wait=None):
                     return
                 data = os.read(fd, 64)
                 event = keyboard_event(data)
-                if event:
+                if event and not (deadline is not None and event["event"] == "media key"):
                     print(json.dumps(event) if as_json else f"{time.strftime('%H:%M:%S')}  {interface_event(data)}",
                           flush=True)
                     if deadline is not None:

@@ -230,6 +230,31 @@ class Sensor(unittest.TestCase):
         self.assertEqual(z20.interface_event(bytes([3, 3, 1, 0, 0, 0])), "keyboard: Game Mode 1")
         self.assertEqual(z20.interface_event(bytes([2, 0xCD, 0])), "media key PlayPause")
 
+    def test_waiting_for_an_event_passes_over_media_keys(self):
+        import contextlib
+        import io
+        import tempfile
+        import threading
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            fifo = os.path.join(d, "hidraw")  # stands in for the keyboard's interface 1
+            os.mkfifo(fifo)
+
+            def keyboard():
+                with open(fifo, "wb", buffering=0) as f:
+                    for report in (bytes([2, 0xE9, 0]), bytes([2, 0, 0]), bytes([3, 3, 1, 0, 0, 0])):
+                        f.write(report)  # volume up, key up, Game Mode on
+                        time.sleep(0.1)
+            threading.Thread(target=keyboard, daemon=True).start()
+            find, z20.find_keyboard = z20.find_keyboard, lambda: (fifo, None)
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out):
+                    z20.watch_events(True, wait=5)
+            finally:
+                z20.find_keyboard = find
+            self.assertEqual(out.getvalue(), '{"event": "Game Mode", "value": 1}\n')
+
 
 class PresenceService(unittest.TestCase):
     def test_leave_and_come_after_their_times(self):
@@ -292,6 +317,28 @@ class PresenceService(unittest.TestCase):
                     z20.set_presence(bad, path)
             with open(path) as f:
                 self.assertIn("leave =\n", f.read())  # nothing written
+
+    def test_changes_at_the_same_time_all_land(self):
+        import tempfile
+        import threading
+        changes = [("leave after", "20"), ("come after", "2"), ("leave", "lock"), ("come", "wake"),
+                   ("distance", "40"), ("away light", "light off")]
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "presence.ini")
+            start = threading.Barrier(len(changes))
+
+            def change(key, value):
+                start.wait()
+                z20.set_presence([(key, value)], path)
+            threads = [threading.Thread(target=change, args=c) for c in changes]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            cfg = z20.presence_config(path)
+            self.assertEqual((cfg["leave_after"], cfg["come_after"], cfg["leave"], cfg["come"], cfg["distance_mm"],
+                              cfg["away_light"]),
+                             (20.0, 2.0, [("lock", 0)], [("wake", 0)], 400, ["light", "off"]))
 
     def test_away_light_and_back(self):
         class Desktop(z20.Desktop):
