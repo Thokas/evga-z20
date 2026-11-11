@@ -259,6 +259,62 @@ class PresenceService(unittest.TestCase):
                 with self.assertRaises(z20.Z20Error, msg=bad):
                     z20.presence_config(path)
 
+    def test_away_light(self):
+        cfg = lambda text: z20.presence_config("presence.ini", "[presence]\n" + text)
+        self.assertEqual(cfg("")["away_light"], [])
+        self.assertEqual(cfg("away light = animate fire ff0000 --cycle 800\n")["away_light"],
+                         ["animate", "fire", "ff0000", "--cycle", "800"])
+        self.assertEqual(cfg("away light = light off\n")["away_light"], ["light", "off"])
+        for bad in ("fire", "light", "light fire", "animate wave", "light reload", "animate fire --save",
+                    "light static ff0000 --live", "light static 'ff0000"):
+            with self.assertRaises(z20.Z20Error, msg=bad):
+                cfg(f"away light = {bad}\n")
+
+    def test_set_changes_only_what_it_sets(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "z20", "presence.ini")
+            z20.set_presence([("leave", "lock")], path)  # no file yet
+            with open(path) as f:
+                self.assertEqual(f.read(), "[presence]\nleave = lock\n")
+            with open(path, "w") as f:
+                f.write("# mine\n[presence]\n# distance = 45\nLeave After = 30\nleave = lock,\n  pause-media\n"
+                        "  # a note\ncome = wake\n\n[other]\nleave = x\n")
+            z20.set_presence([("leave", ""), ("away light", "animate fire"), ("leave after", "20")], path)
+            with open(path) as f:
+                self.assertEqual(f.read(), "# mine\n[presence]\n# distance = 45\nleave after = 20\nleave =\n"
+                                           "  # a note\ncome = wake\naway light = animate fire\n\n[other]\nleave = x\n")
+            cfg = z20.presence_config(path)
+            self.assertEqual((cfg["leave"], cfg["leave_after"], cfg["away_light"]), ([], 20.0, ["animate", "fire"]))
+            for bad in ([("leave", "explode")], [("nonsense", "1")], [("leave run", "a\nb")],
+                        [("away light", "light reload")]):
+                with self.assertRaises(z20.Z20Error, msg=bad):
+                    z20.set_presence(bad, path)
+            with open(path) as f:
+                self.assertIn("leave =\n", f.read())  # nothing written
+
+    def test_away_light_and_back(self):
+        class Desktop(z20.Desktop):
+            def __init__(self):
+                super().__init__()
+                self.calls, self.logged = [], []
+
+            def act(self, argv):
+                self.calls.append(argv[2:])
+
+            def log(self, text):
+                self.logged.append(text)
+
+        desktop = Desktop()
+        desktop.away_light(["light", "breathing", "0040ff", "000000"])
+        desktop.away_light(["animate", "fire"])
+        desktop.lighting_back()
+        self.assertEqual(desktop.calls, [["animate", "off", "--live"],
+                                         ["light", "breathing", "0040ff", "000000", "--live"],
+                                         ["animate", "fire", "--live"], ["animate", "reload"], ["light", "reload"]])
+        self.assertEqual(desktop.logged, ["  away light: light breathing 0040ff 000000", "  away light: animate fire",
+                                          "  lighting back"])
+
     def test_delayed_actions_and_coming_back_early(self):
         p = z20.Pending()
         p.set([("lock", 0), ("screen-off", 60)], now=100)

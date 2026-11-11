@@ -113,6 +113,8 @@ z20 events [--json] [--wait S]        what the keyboard reports itself (profile,
 z20 presence [--dry-run]              lock, pause media, screen off ... when you leave
 z20 presence settings [--json]        what it does: presence.ini with its defaults
                                       (a service, see Presence service)
+z20 presence set KEY VALUE ...        change presence.ini, like
+                                      z20 presence set leave "" away-light "animate fire"
 z20 backup                            profiles 1-9 and macros to ~/.local/state/z20/backups/
 z20 restore DIR [--profile N | --macro N]
                                       write profiles and macros back from a backup
@@ -242,7 +244,19 @@ leave = lock, pause-media, screen-off after 60
 come = wake, resume-media
 # and a command of your own, if you like
 leave run = notify-send "z20" "see you"
+# the keyboard's lighting while you are away, as for z20 light or z20 animate
+away light = animate scanner ff0000 --cycle 2000
 ```
+
+To only light the keyboard when you leave, without locking anything:
+
+```
+z20 presence set leave "" away-light "light breathing ff0000 000000"
+```
+
+`z20 presence set` changes the settings it names and leaves the rest of the
+file, comments too, as it is; it restarts the service if it runs. An empty
+`leave` (or `come`) means nothing, while a missing one means the default.
 
 `lock` is `loginctl lock-session`; `screen-off` and `wake` use KDE's
 `kscreen-doctor` and the screen saver's `SimulateUserActivity`;
@@ -252,7 +266,11 @@ screens behind a dock: in standby they can drop off the DisplayPort bus and
 come back under new names, and KDE may then arrange them differently (seen
 with an Intel laptop and a dock; KDE's own screen-off does the same). Turning
 off "deep sleep" / "auto standby" in the screens' menus usually keeps them
-connected. Coming back drops what leaving
+connected. `away light` shows that lighting (`--live`, nothing is stored)
+from the moment you leave until you come back or the service stops, then
+the stored lighting and the saved software effect return. A software effect
+pauses while the screen is locked, so together with `lock` take one of the
+keyboard's own effects. Coming back drops what leaving
 still had waiting (no screen-off after you sat down again), and the other
 way round. Without a config file: leave =
 `pause-media`, come = `wake, resume-media`. It reads the distance twice a

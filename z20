@@ -72,6 +72,8 @@
                                         (settings: ~/.config/z20/presence.ini; runs until stopped,
                                         as the systemd user service z20-presence)
   z20 presence settings [--json]        what z20 presence does: presence.ini with its defaults
+  z20 presence set KEY VALUE ...        change presence.ini (leave-after 30, leave "lock, pause-media",
+                                        away-light "animate fire", ...); the rest stays as it is
   z20 events [--json] [--wait S]        what the keyboard reports on its own: profile, effect and
                                         Game Mode changed with its keys, media keys (until Ctrl+C,
                                         or only the first event within S seconds)
@@ -915,15 +917,16 @@ def watch_sensor(as_json):
 PRESENCE_CONFIG = os.path.expanduser("~/.config/z20/presence.ini")
 PRESENCE_ACTIONS = ("lock", "screen-off", "wake", "pause-media", "resume-media")
 PRESENCE_DEFAULTS = {"leave after": "30", "come after": "1", "leave": "pause-media", "come": "wake, resume-media",
-                     "leave run": "", "come run": "", "distance": ""}
+                     "leave run": "", "come run": "", "distance": "", "away light": ""}
 
 
-def presence_config(path=PRESENCE_CONFIG):
-    """The [presence] section of the config file, with defaults for what it leaves out."""
+def presence_config(path=PRESENCE_CONFIG, text=None):
+    """The [presence] section of the config file (or of text, as it would be), with defaults for
+    what it leaves out."""
     parser = configparser.ConfigParser(defaults=PRESENCE_DEFAULTS, interpolation=None)
     parser.read_dict({"presence": {}})
     try:
-        parser.read(path)
+        parser.read(path) if text is None else parser.read_string(text, path)
     except configparser.Error as e:
         raise Z20Error(f"{path}: {e}") from None
     section = parser["presence"]
@@ -943,7 +946,58 @@ def presence_config(path=PRESENCE_CONFIG):
                                f"(known: {', '.join(PRESENCE_ACTIONS)}, each with an optional 'after SECONDS')")
             cfg[event].append((found.group(1), float(found.group(2) or 0)))
         cfg[f"{event}_run"] = section[f"{event} run"]
+    # The lighting while away: what follows z20 in "z20 light EFFECT ..." or "z20 animate EFFECT ...".
+    try:
+        cfg["away_light"] = shlex.split(section["away light"])
+    except ValueError as e:
+        raise Z20Error(f"{path}: away light: {e}") from None
+    light = cfg["away_light"]
+    if light and not (len(light) > 1 and (light[0] == "light" and light[1] in EFFECTS
+                                          or light[0] == "animate" and light[1] in ANIMATIONS)
+                      and not {"--live", "--save", "--profile"} & set(light)):
+        raise Z20Error(f"{path}: away light: not a lighting: {section['away light']} (light EFFECT ... or "
+                       f"animate EFFECT ..., as for z20, without --live or --save)")
     return cfg
+
+
+def set_presence(changes, path=PRESENCE_CONFIG):
+    """Change settings of presence.ini's [presence] section, [(key, value)] with the keys of
+    PRESENCE_DEFAULTS, and keep the rest of the file (comments, other settings) as it is. An
+    empty value stays in the file: "leave =" means nothing, while no "leave" means the default."""
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        lines = []
+    header = lambda line: re.fullmatch(r"\s*\[([^]]*)\]\s*", line)
+    start = next((i for i, line in enumerate(lines) if header(line) and header(line).group(1).strip() == "presence"),
+                 None)
+    if start is None:
+        lines += [""] * bool(lines) + ["[presence]"]
+        start = len(lines) - 1
+    for key, value in changes:
+        if key not in PRESENCE_DEFAULTS:
+            raise Z20Error(f"presence set: no setting '{key}' (settings: {', '.join(PRESENCE_DEFAULTS)})")
+        if "\n" in value:
+            raise Z20Error(f"presence set: {key}: one line only")
+        end = next((i for i in range(start + 1, len(lines)) if header(lines[i])), len(lines))
+        at = next((i for i in range(start + 1, end) if re.match(rf"\s*{re.escape(key)}\s*[=:]", lines[i], re.I)),
+                  None)
+        if at is None:  # a new line at the end of the section, before the blank lines that close it
+            at = end
+            while at > start + 1 and not lines[at - 1].strip():
+                at -= 1
+            lines.insert(at, "")
+        else:
+            while at + 1 < end and lines[at + 1][:1].isspace() and lines[at + 1].strip()[:1] not in ("", "#", ";"):
+                del lines[at + 1]  # its value's continuation lines
+                end -= 1
+        lines[at] = f"{key} = {value.strip()}".rstrip()
+    text = "\n".join(lines) + "\n"
+    presence_config(path, text)  # raises before anything is written
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:  # in place: a symlinked file stays one
+        f.write(text)
 
 
 class Presence:
@@ -1045,6 +1099,21 @@ class Desktop:
     def run(self, command):
         self.act(["sh", "-c", command])
 
+    def z20(self, *args):
+        self.act([sys.executable, os.path.realpath(__file__), *args])
+
+    def away_light(self, args):
+        """The lighting while away, for now (--live): the stored one comes back with lighting_back()."""
+        if args[0] == "light":
+            self.z20("animate", "off", "--live")  # a software effect would cover the keyboard's own
+        self.z20(*args, "--live")
+        self.log(f"  away light: {shlex.join(args)}")
+
+    def lighting_back(self):
+        self.z20("animate", "reload")
+        self.z20("light", "reload")
+        self.log("  lighting back")
+
 
 def presence(dry_run):
     """Watch the sensor and run the configured actions when someone leaves and comes back,
@@ -1056,42 +1125,60 @@ def presence(dry_run):
     threshold, checked = cfg["distance_mm"], 0.0
     actions = lambda event: ", ".join(a + (f" after {d:g} s" if d else "") for a, d in cfg[event]) or "-"
     desktop.log(f"presence: leave after {cfg['leave_after']:g} s: {actions('leave')}"
-                f"{'; ' + cfg['leave_run'] if cfg['leave_run'] else ''}; come after {cfg['come_after']:g} s: "
-                f"{actions('come')}{'; ' + cfg['come_run'] if cfg['come_run'] else ''}"
+                f"{'; ' + cfg['leave_run'] if cfg['leave_run'] else ''}"
+                f"{'; away light: ' + shlex.join(cfg['away_light']) if cfg['away_light'] else ''}; "
+                f"come after {cfg['come_after']:g} s: {actions('come')}"
+                f"{'; ' + cfg['come_run'] if cfg['come_run'] else ''}"
                 f"{' (dry run)' if dry_run else ''}; config {PRESENCE_CONFIG}"
                 f"{'' if os.path.exists(PRESENCE_CONFIG) else ' (not there: defaults)'}")
-    trouble, recent = None, []
-    while True:
-        try:
-            kb = Keyboard()  # locked only while reading, so other z20 runs go on
+
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    trouble, recent, lit = None, [], False  # lit: the away light shows
+    try:
+        while True:
             try:
-                if cfg["distance_mm"] is None and time.monotonic() - checked > 60:  # follow profile changes
-                    threshold = sensor_settings(kb.read_profile(kb.profile_number()))["distance_cm"] * 10
-                    checked = time.monotonic()
-                d = kb.distance()
-            finally:
-                kb.close()
-        except Z20Error as e:
-            if str(e) != trouble:
-                desktop.log(f"waiting for the keyboard: {e}")
-                trouble = str(e)
-            time.sleep(5)
-            continue
-        if trouble:
-            desktop.log("keyboard back")
-            trouble = None
-        recent = (recent + [d])[-5:]  # the median of the last 2.5 s: single readings jump around
-        median = sorted(recent)[len(recent) // 2]
-        now = time.monotonic()
-        event = tracker.update(median < threshold, now)
-        if event:
-            desktop.log(f"{'left' if event == 'leave' else 'back'}: {median} mm (present within {threshold / 10:g} cm)")
-            pending.set(cfg[event], now)  # coming back drops what leaving left pending, and the other way round
-            if cfg[f"{event}_run"]:
-                desktop.run(cfg[f"{event}_run"])
-        for action in pending.due(now):
-            desktop.do(action)
-        time.sleep(0.5)
+                kb = Keyboard()  # locked only while reading, so other z20 runs go on
+                try:
+                    if cfg["distance_mm"] is None and time.monotonic() - checked > 60:  # follow profile changes
+                        threshold = sensor_settings(kb.read_profile(kb.profile_number()))["distance_cm"] * 10
+                        checked = time.monotonic()
+                    d = kb.distance()
+                finally:
+                    kb.close()
+            except Z20Error as e:
+                if str(e) != trouble:
+                    desktop.log(f"waiting for the keyboard: {e}")
+                    trouble = str(e)
+                time.sleep(5)
+                continue
+            if trouble:
+                desktop.log("keyboard back")
+                trouble = None
+            recent = (recent + [d])[-5:]  # the median of the last 2.5 s: single readings jump around
+            median = sorted(recent)[len(recent) // 2]
+            now = time.monotonic()
+            event = tracker.update(median < threshold, now)
+            if event:
+                desktop.log(f"{'left' if event == 'leave' else 'back'}: {median} mm "
+                            f"(present within {threshold / 10:g} cm)")
+                pending.set(cfg[event], now)  # coming back drops what leaving left pending, and the other way round
+                if event == "leave" and cfg["away_light"]:
+                    desktop.away_light(cfg["away_light"])
+                    lit = True
+                elif event == "come" and lit:
+                    desktop.lighting_back()
+                    lit = False
+                if cfg[f"{event}_run"]:
+                    desktop.run(cfg[f"{event}_run"])
+            for action in pending.due(now):
+                desktop.do(action)
+            time.sleep(0.5)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        if lit:  # stopped (or logged out) while away
+            desktop.lighting_back()
 
 
 def with_ram_lighting(kb, p, effect):
@@ -1718,7 +1805,8 @@ def presence_settings():
     return {"config": PRESENCE_CONFIG, "exists": os.path.exists(PRESENCE_CONFIG),
             "leave_after_s": cfg["leave_after"], "come_after_s": cfg["come_after"],
             "distance_cm": cfg["distance_mm"] / 10 if cfg["distance_mm"] else None,
-            "leave": steps("leave"), "come": steps("come"), "leave_run": cfg["leave_run"], "come_run": cfg["come_run"]}
+            "leave": steps("leave"), "come": steps("come"), "leave_run": cfg["leave_run"], "come_run": cfg["come_run"],
+            "away_light": shlex.join(cfg["away_light"])}
 
 
 def macros(kb):
@@ -1899,6 +1987,12 @@ def main():
     if args.command == "restore" and len(v) != 1:
         parser.error("restore needs a backup directory")
 
+    if args.command == "presence" and v[:1] == ["set"]:
+        if len(v) < 3 or len(v) % 2 == 0:
+            parser.error("presence set KEY VALUE [KEY VALUE ...] (keys: " + ", ".join(PRESENCE_DEFAULTS) + ")")
+        set_presence([(v[i].lower().replace("-", " "), v[i + 1]) for i in range(1, len(v), 2)])
+        systemctl("try-restart", "z20-presence.service")  # a running service goes by the new settings
+        v = ["settings"]
     if args.command == "presence" and v == ["settings"]:
         s = presence_settings()
         if args.json:
@@ -1907,8 +2001,10 @@ def main():
             steps = lambda event: ", ".join(a["action"] + (f" after {a['after_s']:g} s" if a["after_s"] else "")
                                             for a in s[event]) or "nothing"
             print(f"{s['config']}{'' if s['exists'] else ' (not there: the defaults)'}:\n"
-                  f"  away for {s['leave_after_s']:g} s: {steps('leave')}\n"
-                  f"  back for {s['come_after_s']:g} s: {steps('come')}")
+                  f"  away for {s['leave_after_s']:g} s: {steps('leave')}"
+                  f"{'; lighting: ' + s['away_light'] if s['away_light'] else ''}\n"
+                  f"  back for {s['come_after_s']:g} s: {steps('come')}"
+                  f"{'; the stored lighting' if s['away_light'] else ''}")
         return 0
     if args.command == "animate":
         try:
@@ -1921,7 +2017,7 @@ def main():
         return 0
     if args.command in ("presence", "events"):
         if v:
-            parser.error(f"{args.command} takes no values" + (" but settings" if args.command == "presence" else ""))
+            parser.error(f"{args.command} takes no values" + (" but settings, set" if args.command == "presence" else ""))
         try:
             presence(args.dry_run) if args.command == "presence" else watch_events(args.json, args.wait)
         except KeyboardInterrupt:
