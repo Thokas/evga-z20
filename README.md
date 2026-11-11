@@ -286,6 +286,19 @@ where the empty chair stands (`z20 sensor watch` shows both). The keyboard's
 own leave action wants even more room: it didn't act with the empty chair
 at 46-51 cm and the distance at 45 cm, only from about 70 cm on.
 
+The sensor's beam is narrow: leaning back can take you out of it. It then
+gets no echo, and the distance the keyboard reports sinks to a few cm,
+which means nothing. z20 tells that apart by the keyboard's verdict on each
+measurement (see PROTOCOL.md): `z20 sensor` says "nothing in view" then,
+and the service keeps what it decided last, so leaning back doesn't count
+as leaving and a few cm while you're away don't count as coming back. Leave
+the desk with nothing in the beam either (no chair, no wall within reach),
+and the service can't tell that from leaning back: it notices you leaving
+once it sees something beyond the distance, such as the pushed-back chair.
+Without a `distance` of its own in presence.ini, the service also takes
+near or far from that verdict, at once, instead of from the smoothed
+distance, which needs a few seconds to follow.
+
 To use E1-E5 as desktop shortcuts, give them keys no keyboard has, like
 `z20 key E4 key f14`, and bind those in the desktop's shortcut settings.
 F13-F18 are free; avoid F20-F23, which X keyboard maps turn into mic mute

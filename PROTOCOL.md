@@ -165,6 +165,22 @@ a few minutes: 240-430 at the desk, 0.5-1.3 m with the chair pushed back,
 around 0.5 m with the chair in place, under 100 with a hand over the
 sensor. Unleash polls it for its live display.
 
+Bytes 9-16 of the answer are the keyboard's verdict on its last 8
+measurements, newest first: 1 something within the profile's distance, 2
+something beyond it, 0 no echo. Each request moves them on by one (the same
+at 4 and 10 requests a second), so the keyboard measures when asked. The
+distance in bytes 7-8 is smoothed: each measurement moves it an eighth of
+the way (a jump from 70 to 195 mm, then 169, 144, 125, 111, 98 is one
+sample of about 1.07 m followed by ones near 0). Measurements without an
+echo go into it too, as a few cm: leaning back out of the sensor's beam,
+recorded on 2026-11-11 with the keyboard about 15 cm from the desk edge,
+gave verdicts 0 only and a distance that sank to 40-130 mm, while sitting
+upright gave 1s at 380-430 mm; so a short distance with 0 verdicts means
+nothing is in view, not that something is close. Someone sitting there can
+leave two in three measurements without an echo (seen at 340 mm: `0 0 1 0
+0 1 0 0`), leaning back left at most one in 8. z20 counts as in view at
+least two echoes in 8, and goes by the newest echo for near or far.
+
 The status report on interface 1 (report 3) tells what changed on the
 keyboard itself: `03 <what> <value>`, what = 0 profile, 1 lighting effect,
 2 6KRO / NKRO, 3 Game Mode (`03 03 01` on), 4 reset to default, 6 key

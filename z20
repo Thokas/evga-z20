@@ -183,6 +183,8 @@ LEAVE = {"nothing": 0xFFFF, "sleep": 1, "lock": 2, "dark": 3}  # 0, "turn off", 
 WELCOME = {"fade": 16, "rows": 17, "explosion": 18, "raining": 19, "barber": 20, "lightbar": 21, "thunder": 22}
 # The sensor settings are also in RAM (report 7 blocks 03-0A); z20 doesn't write them there
 # (see update_ram).
+# The keyboard's verdict on each measurement of the sensor (general 0x41, bytes 9-16).
+SEEN = {0: "nothing", 1: "near", 2: "far"}
 # Status reports on interface 1 (report 3): what changed on the keyboard itself.
 STATUS_EVENTS = {0: "profile", 1: "lighting effect", 2: "NKRO", 3: "Game Mode", 4: "reset to default",
                  6: "key position"}
@@ -437,9 +439,12 @@ class Keyboard:
         self.general(0x0F, WRITE, int(on), wait=0.1)
 
     def distance(self):
-        """What the presence sensor measures now, in mm."""
+        """What the presence sensor measures now: the distance in mm, as the keyboard smooths it
+        (each measurement moves it an eighth of the way), and the keyboard's verdict on its last 8
+        measurements, newest first: "near" (within the profile's distance), "far", or "nothing"
+        (no echo: the distance then drifts toward a few cm, which means nothing). See in_view()."""
         a = self.general(0x41)
-        return a[7] | a[8] << 8
+        return a[7] | a[8] << 8, [SEEN.get(b, str(b)) for b in a[9:17]]
 
     def read_profile(self, n):
         p = self.call(bytes([8, *HEADER, READ, n]), 0.02)
@@ -884,6 +889,18 @@ def interface_event(data):
     return f"report {data.hex(' ')}"
 
 
+def in_view(seen):
+    """Whether the sensor sees something, from the keyboard's verdicts (Keyboard.distance): at least
+    two of the last 8 measurements had an echo. Someone sitting there can leave two in three without
+    one (a weak echo); leaning back out of the beam, or a desk with nothing in front, leaves at most
+    one. Near or far then goes by the newest echo (newest_echo)."""
+    return sum(s != "nothing" for s in seen) >= 2
+
+
+def newest_echo(seen):
+    return next((s for s in seen if s != "nothing"), "nothing")
+
+
 def watch_sensor(as_json):
     """Print the distance and presence as they change, and what the keyboard sends on
     interface 1, until Ctrl+C."""
@@ -892,17 +909,18 @@ def watch_sensor(as_json):
     threshold = sensor_settings(kb.read_profile(kb.profile_number()))["distance_cm"] * 10
     kb.close()
     events = os.open(path, os.O_RDONLY | os.O_NONBLOCK)  # input reports; no lock needed to read them
-    last_shown, present = None, None
+    last_shown, present = None, "?"  # nothing shown yet
     try:
         while True:
             kb = Keyboard()  # locked only while reading, so other z20 runs go on
-            d = kb.distance()
+            d, seen = kb.distance()
             kb.close()
-            now = d < threshold
-            if now != present or last_shown is None or abs(d - last_shown) >= 50:
-                state = {"distance_mm": d, "present": now}
-                print(json.dumps(state) if as_json else f"{time.strftime('%H:%M:%S')}  {d:5d} mm  "
-                      f"{'present' if now else 'away'}", flush=True)
+            now = (d < threshold) if in_view(seen) else None  # None: nothing in view
+            if now != present or now is not None and abs(d - last_shown) >= 50:
+                state = {"distance_mm": d, "in_view": now is not None, "present": now}
+                print(json.dumps(state) if as_json else f"{time.strftime('%H:%M:%S')}  " + (
+                      f"{d:5d} mm  {'present' if now else 'away'}" if now is not None
+                      else "nothing in view (leaning back, or nobody)"), flush=True)
                 last_shown, present = d, now
             while select.select([events], [], [], 0)[0]:
                 text = interface_event(os.read(events, 64))
@@ -1131,7 +1149,7 @@ def presence(dry_run):
     desktop = Desktop(dry_run)
     tracker = Presence(cfg["leave_after"], cfg["come_after"])
     pending = Pending()
-    threshold, checked = cfg["distance_mm"], 0.0
+    threshold, checked = cfg["distance_mm"], float("-inf")  # the profile's distance from the first reading on
     actions = lambda event: ", ".join(a + (f" after {d:g} s" if d else "") for a, d in cfg[event]) or "-"
     desktop.log(f"presence: leave after {cfg['leave_after']:g} s: {actions('leave')}"
                 f"{'; ' + cfg['leave_run'] if cfg['leave_run'] else ''}"
@@ -1144,7 +1162,8 @@ def presence(dry_run):
     def stop(_signum, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop)
-    trouble, recent, lit = None, [], False  # lit: the away light shows
+    # lit: the away light shows; viewing: the sensor sees something; settled: from when the distance counts
+    trouble, recent, lit, viewing, settled = None, [], False, True, 0.0
     try:
         while True:
             try:
@@ -1153,7 +1172,7 @@ def presence(dry_run):
                     if cfg["distance_mm"] is None and time.monotonic() - checked > 60:  # follow profile changes
                         threshold = sensor_settings(kb.read_profile(kb.profile_number()))["distance_cm"] * 10
                         checked = time.monotonic()
-                    d = kb.distance()
+                    d, seen = kb.distance()
                 finally:
                     kb.close()
             except Z20Error as e:
@@ -1165,12 +1184,27 @@ def presence(dry_run):
             if trouble:
                 desktop.log("keyboard back")
                 trouble = None
-            recent = (recent + [d])[-5:]  # the median of the last 2.5 s: single readings jump around
-            median = sorted(recent)[len(recent) // 2]
             now = time.monotonic()
-            event = tracker.update(median < threshold, now)
+            event = None
+            if not in_view(seen):
+                if viewing:  # leaned back out of the beam, or gone with nothing in front: no telling which
+                    desktop.log(f"nothing in view: {'present' if tracker.present else 'away'} until the sensor "
+                                f"sees something again")
+                    viewing, recent = False, []
+            else:
+                if not viewing:
+                    desktop.log(f"in view again: {d} mm")
+                    viewing, settled = True, now + 3  # the smoothed distance climbs back from a few cm
+                # Near or not, for each reading of the last 2.5 s; most of them decide (single ones jump
+                # around). With the profile's distance, the keyboard's verdict says it at once.
+                if cfg["distance_mm"] is None:
+                    recent = (recent + [newest_echo(seen) == "near"])[-5:]
+                elif now >= settled:
+                    recent = (recent + [d < threshold])[-5:]
+                if recent:
+                    event = tracker.update(sorted(recent)[len(recent) // 2], now)
             if event:
-                desktop.log(f"{'left' if event == 'leave' else 'back'}: {median} mm "
+                desktop.log(f"{'left' if event == 'leave' else 'back'}: {d} mm "
                             f"(present within {threshold / 10:g} cm)")
                 pending.set(cfg[event], now)  # coming back drops what leaving left pending, and the other way round
                 if event == "leave" and cfg["away_light"]:
@@ -2215,13 +2249,14 @@ def main():
                     else set_sensor(p, v)
                 kb.write_profile(n, p)
             s = {"profile": n, **sensor_settings(p)}
-            if n == kb.profile_number():
-                s["distance_mm"] = kb.distance()
+            if n == kb.profile_number():  # what it measures now; without anything in view the distance means nothing
+                s["distance_mm"], s["seen"] = kb.distance()
+                s["in_view"] = in_view(s["seen"])
             if args.json:
                 print(json.dumps(s))
             elif not v or sys.stdout.isatty():
-                print(f"profile {n}: {sensor_text(s)}" +
-                      (f"; now {s['distance_mm']} mm" if "distance_mm" in s else ""))
+                print(f"profile {n}: {sensor_text(s)}" + ("" if "distance_mm" not in s else
+                      f"; now {s['distance_mm']} mm" if s["in_view"] else "; now nothing in view"))
         elif args.command == "backup":
             print(backup(kb))
         elif args.command == "restore":

@@ -265,6 +265,59 @@ class PresenceService(unittest.TestCase):
         # away 5-20 is too short; away from 21 counts after 30 s; near from 60 counts after 1 s
         self.assertEqual([(t, e) for t, e in events if e], [(51, "leave"), (61, "come")])
 
+    def test_the_sensors_answer(self):
+        kb = z20.Keyboard.__new__(z20.Keyboard)  # no device: only the answer
+        kb.general = lambda command: bytes.fromhex("04 ea 02 41 01 00 c0 41 02 02 01 00 01 01 01 01 01")
+        self.assertEqual(kb.distance(), (577, ["far", "near", "nothing", "near", "near", "near", "near", "near"]))
+
+    def test_in_view(self):
+        verdicts = lambda text: [{"0": "nothing", "1": "near", "2": "far"}[c] for c in text]
+        # as recorded: sitting with a weak echo, sitting, out of the beam, leaning back with one stray echo
+        for text, view, newest in (("00100100", True, "near"), ("11111111", True, "near"), ("21111111", True, "far"),
+                                   ("00000000", False, "nothing"), ("00000010", False, "near")):
+            self.assertEqual((z20.in_view(verdicts(text)), z20.newest_echo(verdicts(text))), (view, newest), text)
+
+    def test_nothing_in_view_holds_present_or_away(self):
+        near, far = (380, ["near"] * 8), (700, ["far"] * 8)
+        nothing = (45, ["nothing"] * 8)  # the distance then drifts to a few cm and means nothing
+        # s: sitting 10, leaning back out of view 60 (no leave), gone 35 (leave after 30), the sensor
+        # losing the chair 10 (no come: 45 mm would have been "near"), back 5 (come after 1)
+        readings = iter([near] * 20 + [nothing] * 120 + [far] * 70 + [nothing] * 20 + [near] * 10)
+        clock = [0.0]
+
+        class Keyboard:
+            def distance(self):
+                try:
+                    return next(readings)
+                except StopIteration:
+                    raise KeyboardInterrupt from None
+
+            def profile_number(self):
+                return 1
+
+            def read_profile(self, n):
+                return None
+
+            def close(self):
+                pass
+        cfg = z20.presence_config("presence.ini", "[presence]\nleave = lock\ncome = wake\n")
+        saved = (z20.Keyboard, z20.presence_config, z20.sensor_settings, z20.time.monotonic, z20.time.sleep,
+                 z20.Desktop.do, z20.Desktop.log)
+        done = []
+        try:
+            z20.Keyboard, z20.presence_config = Keyboard, lambda: cfg
+            z20.sensor_settings = lambda p: {"distance_cm": 50.0}
+            z20.time.monotonic = lambda: clock[0]
+            z20.time.sleep = lambda s: clock.__setitem__(0, clock[0] + s)
+            z20.Desktop.do = lambda self, action: done.append((clock[0], action))
+            z20.Desktop.log = lambda self, text: None
+            with self.assertRaises(KeyboardInterrupt):
+                z20.presence(dry_run=True)
+        finally:
+            (z20.Keyboard, z20.presence_config, z20.sensor_settings, z20.time.monotonic, z20.time.sleep,
+             z20.Desktop.do, z20.Desktop.log) = saved
+        self.assertEqual(done, [(100.0, "lock"), (116.0, "wake")])
+
     def test_config(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
