@@ -1771,14 +1771,17 @@ def animate_command(v, args):
 # the z20-backlight service keeps, and off while the desktop has its keyboard light off. The desktop's
 # is UPower's keyboard backlight, which KDE Plasma (PowerDevil) and GNOME set: their slider, the
 # brightness keys, off when the screen dims or goes off while idle. PowerDevil knows one keyboard
-# light, UPower's first (a laptop's own; from UPower 1.91.4 on all of them at once), and z20 takes
-# from it only off and on again, as the desktop sets it (UPower: 'external'), not what the laptop
-# does itself ('internal': its own Fn key; a ThinkPad with the lid closed puts its last level back
-# when set to 0). Nor the off that comes with closing the lid: PowerDevil turns the laptop's keys
-# dark then, even with screens attached. The same off comes when PowerDevil dims the screens while
-# idle: z20 then asks kscreen-doctor (KDE) and dims the Z20 as much as the screens are (30 %), and
-# turns it off with the screens. Where the kernel's uleds may be used, the level is also an LED of
-# its own, which UPower offers as a keyboard light (and systemd-backlight may keep).
+# light, UPower's first (a laptop's own; from UPower 1.91.4 on all of them at once). From it z20
+# takes a new level (Plasma's slider at low: 50 % on a ThinkPad's 3 steps), off and on again, as the
+# desktop sets it (UPower: 'external'), not what the laptop does itself ('internal': its own Fn key;
+# a ThinkPad with the lid closed puts its last level back when set to 0). Nor the off that comes
+# with closing the lid: PowerDevil turns the laptop's keys dark then, even with screens attached,
+# and again on each power profile load while the lid is closed (settings saved, AC plugged in or
+# out); its lidClosedChanged on the session bus says so each time, UPower's lid only the first.
+# The same off comes when PowerDevil dims the screens while idle: z20 then asks kscreen-doctor (KDE)
+# and dims the Z20 as much as the screens are (30 %), and turns it off with the screens. Where the
+# kernel's uleds may be used, the level is also an LED of its own, which UPower offers as a keyboard
+# light (and systemd-backlight may keep).
 LID_OFF_S = 3  # an off this soon after the lid closed is the lid's
 # After the desktop's off, look at the screens then (KWin has dimmed them within about half a
 # second), again, and so on while they are dimmed.
@@ -1829,6 +1832,25 @@ def backlight_text(info):
     return f"keyboard light {info['percent']} %" + ("; dark while the desktop has its keyboard light off"
                                                     if info["off"] else f"; {info['shown']} % while the desktop "
                                                     "dims its screens" if info["dimmed"] else "")
+
+
+def upower_get(path, method):
+    """GetBrightness or GetMaxBrightness of one of UPower's keyboard lights; None if it has none there."""
+    try:
+        out = subprocess.run(["busctl", "--system", "call", UPOWER_KBD[0], path, UPOWER_KBD[2], method],
+                             capture_output=True, text=True, timeout=5).stdout.split()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return int(out[1]) if len(out) == 2 and out[0] == "i" else None
+
+
+def desktop_level(value, most, last):
+    """The Z20's level from the keyboard light the desktop set (value of most), or None for keeping its
+    own: at 0 (off, dimming), at the value it set last (brought back after dimming, the lid, a
+    suspend), without a maximum."""
+    if not value or value == last or not most:
+        return None
+    return round(min(value, most) * 100 / most)
 
 
 def upower_set(path, value):
@@ -1938,11 +1960,13 @@ def desktop_set(line):
 
 
 def lid_closed(line):
-    """True if a line of gdbus monitor on UPower says the laptop's lid was closed, False if opened,
-    else None."""
-    if not line.startswith(b"/org/freedesktop/UPower: org.freedesktop.DBus.Properties.PropertiesChanged "):
-        return None
-    m = re.search(rb"'LidIsClosed': <(true|false)>", line)
+    """True if a line of gdbus monitor on UPower or PowerDevil says the laptop's lid was closed (or,
+    PowerDevil, that it acts again on the closed lid), False if opened, else None."""
+    if line.startswith(b"/org/freedesktop/UPower: org.freedesktop.DBus.Properties.PropertiesChanged "):
+        m = re.search(rb"'LidIsClosed': <(true|false)>", line)
+    else:
+        m = re.fullmatch(rb"/org/kde/Solid/PowerManagement: org\.kde\.Solid\.PowerManagement\.lidClosedChanged "
+                         rb"\((true|false),\)", line.rstrip())
     return m[1] == b"true" if m else None
 
 
@@ -1980,6 +2004,7 @@ def backlight():
     except (OSError, ValueError, KeyError, TypeError):
         pass
     level, led, synced = backlight_level(), None, None
+    asked = upower_get(UPOWER_KBD[1], "GetBrightness") or None  # the desktop's keyboard light as set last
     # dark: the desktop has its keyboard light off; dim: how much of the level that leaves (1, 0.3 while
     # it dims the screens, 0); look: when to look at the screens next, looks: how often it did since
     dark, dim, look, looks = False, 1.0, None, 0
@@ -1994,11 +2019,14 @@ def backlight():
             os.close(led)
             led = None
         say(f"no keyboard light of its own ({ULEDS}: {e.strerror}; see the README)")
-    try:
-        monitor = subprocess.Popen(["gdbus", "monitor", "--system", "--dest", UPOWER_KBD[0]],
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:  # UPower: the keyboard lights and the lid; PowerDevil: its lid handling
+        monitors = [subprocess.Popen(["gdbus", "monitor", *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    for args in (["--system", "--dest", UPOWER_KBD[0]],
+                                 ["--session", "--dest", "org.kde.Solid.PowerManagement",
+                                  "--object-path", "/org/kde/Solid/PowerManagement"])]
     except OSError as e:
         raise Z20Error(f"gdbus: {e.strerror} (it comes with GLib: libglib2.0-bin, glib2)") from None
+    pending = {m.stdout.fileno(): b"" for m in monitors}  # what came of a line so far
     wake_r, wake_w = os.pipe()  # signals wake the select below
     os.set_blocking(wake_w, False)
 
@@ -2025,7 +2053,8 @@ def backlight():
         finally:
             signal.pthread_sigmask(signal.SIG_UNBLOCK, stops)
 
-    said, saved, trouble, pending, lid = None, None, None, b"", float("-inf")  # lid: when it closed
+    said, saved, trouble = None, None, None
+    lid = dark_at = float("-inf")  # when the lid closed (or PowerDevil acted on it again), the desktop's off
     try:
         while True:
             now = time.monotonic()
@@ -2061,7 +2090,7 @@ def backlight():
             for at in (synced, look):
                 if at is not None:
                     timeout = max(0.0, at - now if timeout is None else min(timeout, at - now))
-            ready = select.select([monitor.stdout, wake_r, *([led] if led is not None else [])], [], [], timeout)[0]
+            ready = select.select([*pending, wake_r, *([led] if led is not None else [])], [], [], timeout)[0]
             if wake_r in ready and signal.SIGUSR2 in os.read(wake_r, 64):  # z20 backlight P: light it
                 level, dark, dim, look = backlight_level(), False, 1.0, None
             if led is not None and led in ready:
@@ -2069,21 +2098,32 @@ def backlight():
                 if synced is None and 0 <= value <= 100 and value != level:  # set through UPower
                     level = value
                     save_json(BACKLIGHT_LEVEL, {"percent": level})
-            if monitor.stdout in ready:
-                data = os.read(monitor.stdout.fileno(), 4096)
+            for fd in (fd for fd in ready if fd in pending):
+                data = os.read(fd, 4096)
                 if not data:
                     raise Z20Error("gdbus monitor ended")
-                *lines, pending = (pending + data).split(b"\n")
+                *lines, pending[fd] = (pending[fd] + data).split(b"\n")
                 for line in lines:
+                    now = time.monotonic()
                     if lid_closed(line):
-                        lid = time.monotonic()
-                    elif desktop_set(line) == 0 and time.monotonic() - lid < LID_OFF_S:
-                        say("the lid closed: the desktop has its keyboard light off for the laptop's keys, "
+                        lid = now
+                        if dark and now - dark_at < LID_OFF_S:  # its off came first (the buses don't wait)
+                            dark, dim, look = False, 1.0, None
+                            say("the lid is closed: the desktop has its keyboard light off for the laptop's keys, "
+                                "the Z20 stays lit")
+                    elif desktop_set(line) == 0 and now - lid < LID_OFF_S:
+                        say("the lid is closed: the desktop has its keyboard light off for the laptop's keys, "
                             "the Z20 stays lit")
                     elif desktop_set(line) == 0:  # off, or the screens dim or go off: look at them
-                        dark, look, looks = True, time.monotonic() + SCREENS_S[0], 0
-                    elif desktop_set(line) is not None:
-                        dark, dim, look = False, 1.0, None
+                        dark, dark_at, look, looks = True, now, now + SCREENS_S[0], 0
+                    elif desktop_set(line) is not None:  # on; its slider or keys: a new level
+                        new = desktop_level(desktop_set(line), upower_get(UPOWER_KBD[1], "GetMaxBrightness"), asked)
+                        if new is not None and new != level:
+                            level = new
+                            save_json(BACKLIGHT_LEVEL, {"percent": level})
+                            if led is not None and synced is None:
+                                upower_set(UPOWER_LED, level)  # its LED in step
+                        dark, dim, look, asked = False, 1.0, None, desktop_set(line)
     except KeyboardInterrupt:
         pass
     finally:
@@ -2091,7 +2131,8 @@ def backlight():
         signal.signal(signal.SIGUSR2, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)  # a second one doesn't cut this short
         signal.set_wakeup_fd(-1)
-        monitor.terminate()
+        for m in monitors:
+            m.terminate()
         if led is not None:
             os.close(led)  # the LED goes; systemd-backlight keeps its level for the next login
         if applied is not None and applied < 100:  # the lighting as it is set again

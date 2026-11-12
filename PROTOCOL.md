@@ -190,7 +190,10 @@ keys and the volume wheel come as report 2 (consumer usage, then `00 00`).
 
 Not found: the brightness set with Fn + Up / Down. Two steps down changed no
 byte of the profile, of the lighting blocks in RAM or of the general
-settings readable with report 4, and sent no status report.
+settings readable with report 4, and sent no status report. Nor of report 7
+blocks `02` and `16`-`1A`, which answer a read (`1B` is the report rate;
+`1C`-`1F` refuse one); `16`-`1A` look like the welcome effects 18-22
+(explosion to thunder), laid out like the other effects.
 
 ### Key functions
 

@@ -915,6 +915,14 @@ class Backlight(unittest.TestCase):
             finally:
                 z20.subprocess.run = old
 
+    def test_a_level_from_the_desktop(self):
+        # a ThinkPad's 3 steps; what it set last comes back after dimming, the lid, a suspend
+        self.assertEqual([z20.desktop_level(v, 2, last) for v, last in ((1, 2), (2, 1), (1, None), (0, 2),
+                                                                        (2, 2), (1, 1), (5, 2), (1, 0))],
+                         [50, 100, 50, None, None, None, 100, 50])
+        self.assertIsNone(z20.desktop_level(1, None, 2))  # UPower didn't say its maximum
+        self.assertEqual(z20.desktop_level(1, 3, 2), 33)
+
     def test_the_lid(self):
         changed = b"/org/freedesktop/UPower: org.freedesktop.DBus.Properties.PropertiesChanged ('org.freedesktop.UPower', "
         battery = (b"/org/freedesktop/UPower/devices/battery_BAT0: org.freedesktop.DBus.Properties.PropertiesChanged "
@@ -922,6 +930,11 @@ class Backlight(unittest.TestCase):
         self.assertEqual([z20.lid_closed(line) for line in (changed + b"{'LidIsClosed': <true>}, @as [])",
                                                              changed + b"{'OnBattery': <false>, 'LidIsClosed': <false>}, @as [])",
                                                              changed + b"{'OnBattery': <true>}, @as [])", battery)],
+                         [True, False, None, None])
+        # PowerDevil: on closing, and again on each power profile load while the lid is closed
+        pd = b"/org/kde/Solid/PowerManagement: org.kde.Solid.PowerManagement."
+        self.assertEqual([z20.lid_closed(line) for line in (pd + b"lidClosedChanged (true,)", pd + b"lidClosedChanged (false,)\n",
+                                                             pd + b"profileChanged ('AC',)", pd + b"configurationReloaded ()")],
                          [True, False, None, None])
 
 class Commands(unittest.TestCase):

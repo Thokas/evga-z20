@@ -228,10 +228,11 @@ runs, `z20 light` changes the lighting underneath it.
 
 The Z20 has a keyboard light of its own: a level, in percent of how the
 lighting is set, that the `z20-backlight` user service keeps. It goes along
-with the desktop's keyboard light: when KDE Plasma dims the screens while
-you're away, the Z20 dims as much (to 30 % of its level); when it turns them
-off, or its keyboard light is switched off otherwise (its slider at 0), the
-Z20 is dark. It comes back with the screens.
+with the desktop's keyboard light: its slider sets it too, and when KDE
+Plasma dims the screens while you're away, the Z20 dims as much (to 30 % of
+its level); when it turns them off, or its keyboard light is switched off
+otherwise (its slider at 0), the Z20 is dark. It comes back with the
+screens.
 
 ```
 z20 backlight 60                              the Z20 at 60 % (enables the service)
@@ -263,13 +264,19 @@ From UPower 1.91.4 on, that one sets all keyboard lights at once, so there
 Plasma's slider moves the Z20 as well. Without the LED, `z20 backlight` works
 the same, only UPower doesn't know it.
 
-From the desktop's keyboard light, z20 takes only off and on, and only when
-the desktop sets it: a laptop's own key for its light leaves the Z20 alone.
+Plasma's keyboard slider (a laptop's light) sets the Z20 as well: low is
+50 %, high 100 % with a ThinkPad's three steps. Whichever slider you moved
+last counts; Plasma bringing its light back after dimming, the lid or a
+suspend doesn't undo the Z20's own. z20 takes what the desktop sets, not
+what the laptop does itself: a laptop's own key for its light leaves the
+Z20 alone.
 Plasma only turns its keyboard light off, also when it dims the screens, so
 z20 then asks `kscreen-doctor` how far the screens are dimmed and whether
 they are off (elsewhere, off is off).
 Plasma also turns its keyboard light off when the lid closes (for the
-laptop's own keys, even with screens attached); the Z20 stays lit then.
+laptop's own keys, even with screens attached), and again each time it loads
+a power profile while the lid is closed (settings saved, the power cable
+plugged in or out); the Z20 stays lit then.
 Plasma turns its keyboard light off when idle only if it is on, so with a
 laptop's light switched off by its own key, the Z20 stays lit when the screen
 dims. On a desktop computer without a keyboard light, Plasma has none to turn
