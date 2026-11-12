@@ -746,6 +746,183 @@ class Animate(unittest.TestCase):
                 z20.ANIMATION_STATE = old
 
 
+class Backlight(unittest.TestCase):
+    class Keyboard:
+        """The lighting in RAM as a profile puts it there (padded blocks); records which blocks are written."""
+        def __init__(self, p):
+            self.ram, self.written = {}, []
+            self.load(p)
+
+        def load(self, p):  # as a reload or profile switch does
+            self.ram[z20.RAM_EFFECT] = bytes(p[z20.P_EFFECT:z20.P_EFFECT + 2]).ljust(128, b"\x99")
+            for block, at, size in z20.RAM_BLOCKS.values():
+                self.ram[block] = bytes(p[at:at + size]).ljust(128, b"\x99")
+
+        def read_ram(self, block):
+            return self.ram[block]
+
+        def write_ram(self, block, data):
+            self.written.append(block)
+            self.ram[block] = bytes(data)
+
+    def block(self, kb, effect):
+        block, _, size = z20.RAM_BLOCKS[effect]
+        return kb.ram[block][:size]
+
+    def brightness(self, kb, effect):
+        at = z20.RAM_BLOCKS[effect][1]
+        return [self.block(kb, effect)[i - at] for i in z20.BRIGHTNESS_AT[effect]]
+
+    def test_only_brightness_bytes(self):
+        p = profile(1)
+        for effect, (_, at, size) in z20.RAM_BLOCKS.items():
+            block = bytes(p[at:at + size])
+            spots = {i - at for i in z20.BRIGHTNESS_AT[effect]}
+            self.assertTrue(spots and all(0 <= i < size for i in spots), effect)
+            self.assertEqual(z20.dimmed(block, effect, 100), block)
+            self.assertEqual(changed(z20.dimmed(block, effect, 0), block), {i for i in spots if block[i]}, effect)
+        self.assertIn(z20.P_PULSE + 21, z20.BRIGHTNESS_AT[3])  # pulse's background color goes dark too
+        frame = z20.color_frame(None, [("all", "ff8000")], 80)
+        self.assertEqual(z20.dimmed_frame(frame, 50)[:8], bytes([102, 0xFF, 0x80, 0, 102, 0xFF, 0x80, 0]))
+
+    def test_dims_the_running_effect_and_brings_it_back(self):
+        p = z20.set_lighting(profile(1), "wave", [], 100, None)
+        kb, dimmer = self.Keyboard(p), z20.Dimmer()
+        dimmer.apply(kb, 50)
+        self.assertEqual(self.brightness(kb, 5), [128] * 8)
+        self.assertEqual(changed(self.block(kb, 5), p[z20.P_WAVE:z20.P_WAVE + 51]),
+                         {i - z20.P_WAVE for i in z20.BRIGHTNESS_AT[5]})
+        self.assertEqual(kb.ram[0x11][51:], b"\x99" * 77)  # the rest of the block as it was
+        dimmer.apply(kb, 50)
+        dimmer.apply(kb, 0)
+        self.assertEqual((kb.written, self.brightness(kb, 5)), ([0x11, 0x11], [0] * 8))
+        dimmer.apply(kb, 100)
+        self.assertEqual(self.block(kb, 5), p[z20.P_WAVE:z20.P_WAVE + 51])
+
+    def test_a_new_lighting_is_dimmed_as_set(self):
+        p = z20.set_lighting(profile(1), "wave", [], 100, None)
+        kb, dimmer = self.Keyboard(p), z20.Dimmer()
+        dimmer.apply(kb, 50)
+        kb.load(z20.set_lighting(p, "wave", [], 60, None))  # z20 light wave --brightness 60, a reload
+        dimmer.apply(kb, 50)
+        self.assertEqual(self.brightness(kb, 5), [76] * 8)  # half of 153, not of 128
+        dimmer.apply(kb, 100)
+        self.assertEqual(self.brightness(kb, 5), [153] * 8)
+
+    def test_an_effect_left_behind_gets_its_block_back(self):
+        p = z20.set_lighting(z20.set_lighting(profile(1), "static", [b"\xff\x00\x00"], 100, None), "wave", [], 100, None)
+        kb, dimmer = self.Keyboard(p), z20.Dimmer()
+        dimmer.apply(kb, 50)
+        kb.ram[z20.RAM_EFFECT] = b"\x01\x00".ljust(128, b"\x99")  # the Fn keys switch to static
+        dimmer.apply(kb, 50)
+        self.assertEqual(self.block(kb, 5), p[z20.P_WAVE:z20.P_WAVE + 51])
+        self.assertEqual(self.brightness(kb, 1), [128])
+        kb.ram[z20.RAM_EFFECT] = b"\x00\x00".ljust(128, b"\x99")  # off: nothing to dim
+        dimmer.apply(kb, 50)
+        self.assertEqual(self.brightness(kb, 1), [255])
+        self.assertEqual(dimmer.state(), {"effect": None, "block": None, "shown": None})
+
+    def test_resumes_what_a_killed_one_dimmed(self):
+        p = z20.set_lighting(profile(1), "wave", [], 100, None)
+        kb, dimmer = self.Keyboard(p), z20.Dimmer()
+        dimmer.apply(kb, 30)
+        again = z20.Dimmer()
+        again.resume(dimmer.state())
+        again.apply(kb, 100)
+        self.assertEqual(self.block(kb, 5), p[z20.P_WAVE:z20.P_WAVE + 51])
+
+    def test_shown_as_set(self):
+        p = z20.set_lighting(profile(1), "wave", [], 100, None)
+        kb, dimmer = self.Keyboard(p), z20.Dimmer()
+        dimmer.apply(kb, 20)
+        old = z20.backlight_state
+        z20.backlight_state = lambda: {"pid": 1, "percent": 20, **dimmer.state()}
+        try:
+            self.assertEqual(z20.lighting(z20.with_ram_lighting(kb, profile(1), 5))["brightness"], 100)
+            kb.load(z20.set_lighting(p, "wave", [], 60, None))  # changed since: RAM as it is
+            self.assertEqual(z20.lighting(z20.with_ram_lighting(kb, profile(1), 5))["brightness"], 60)
+        finally:
+            z20.backlight_state = old
+
+    def test_without_it_full_brightness(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            old = z20.BACKLIGHT_STATE
+            z20.BACKLIGHT_STATE = os.path.join(d, "z20-backlight.json")
+            try:
+                self.assertEqual(z20.backlight_percent(), 100)
+                z20.save_json(z20.BACKLIGHT_STATE, {"pid": os.getpid(), "percent": 0})
+                self.assertEqual(z20.backlight_percent(), 100)  # this process isn't a z20 backlight
+            finally:
+                z20.BACKLIGHT_STATE = old
+
+    def test_its_own_level(self):
+        import signal
+        import tempfile
+        told, calls = [], []
+        old = (z20.BACKLIGHT_LEVEL, z20.backlight_state, z20.upower_set, z20.systemctl,
+               signal.signal(signal.SIGUSR2, lambda signum, frame: told.append(signum)))
+        with tempfile.TemporaryDirectory() as d:
+            z20.BACKLIGHT_LEVEL = os.path.join(d, "backlight.json")
+            z20.backlight_state = lambda: {"pid": os.getpid(), "percent": 100, "off": False, "led": True}
+            z20.upower_set = lambda path, value: calls.append(("upower", path, value)) or True
+            z20.systemctl = lambda *args, check=False: calls.append(args)
+            try:
+                self.assertEqual(z20.backlight_level(), 100)
+                self.assertEqual([z20.set_backlight(w) for w in ("up", "45", "down", "down", "0", "down")],
+                                 [100, 45, 35, 25, 0, 0])
+                self.assertEqual(z20.backlight_level(), 0)
+                self.assertEqual(calls[1], ("upower", z20.UPOWER_KBD[1] + "/evga_z20ookbd_backlight", 45))
+                self.assertEqual(len(told), 6)  # the service hears of each; none enabled it
+                self.assertEqual(z20.backlight_info(), {"percent": 0, "shown": 100, "off": False, "dimmed": False,
+                                                        "service": True, "led": True})
+                z20.backlight_state = lambda: None
+                with open(z20.BACKLIGHT_LEVEL, "w") as f:
+                    f.write('{"percent": 250}')
+                self.assertEqual(z20.backlight_level(), 100)
+                self.assertIn("doesn't run", z20.backlight_text(z20.backlight_info()))
+            finally:
+                (z20.BACKLIGHT_LEVEL, z20.backlight_state, z20.upower_set, z20.systemctl, handler) = old
+                signal.signal(signal.SIGUSR2, handler)
+
+    def test_what_the_desktop_sets(self):
+        # gdbus monitor on UPower; the ThinkPad puts its level back on its own, the Z20's LED has its own path
+        path = b"/org/freedesktop/UPower/KbdBacklight: org.freedesktop.UPower.KbdBacklight."
+        led = b"/org/freedesktop/UPower/KbdBacklight/evga_z20ookbd_backlight: org.freedesktop.UPower.KbdBacklight."
+        lines = [b"The name org.freedesktop.UPower is owned by :1.43", path + b"BrightnessChanged (0,)",
+                 path + b"BrightnessChangedWithSource (0, 'external')", path + b"BrightnessChanged (1,)",
+                 path + b"BrightnessChangedWithSource (1, 'internal')", led + b"BrightnessChangedWithSource (0, 'external')",
+                 path + b"BrightnessChangedWithSource (2, 'external')\n"]
+        self.assertEqual([z20.desktop_set(line) for line in lines], [None, None, 0, None, None, None, 2])
+
+    def test_the_screens(self):
+        import subprocess
+
+        def output(n, name, enabled, dimming):
+            return (f"\x1b[01;32mOutput: \x1b[0;0m{n} {name} 6fb1ba17\n\t\x1b[01;3{2 if enabled else 1}m"
+                    f"{'enabled' if enabled else 'disabled'}\x1b[0;0m\n\t\x1b[01;32mconnected\x1b[0;0m\n"
+                    f"\tBrightness control: supported, set to 100% and dimming to {dimming}%\n")
+        old = z20.subprocess.run
+        # the laptop's own screen off and not dimmed; a third screen without brightness control
+        for dimming, modes, seen in ((100, "on on", (False, 1.0)), (30, "on on", (False, 0.3)),
+                                     (30, "off off", (True, 0.3)), (100, "", (False, 1.0))):
+            answers = {"-o": output(1, "eDP-1", False, 100) + output(2, "DP-1", True, dimming)
+                       + output(3, "DP-8", True, dimming) + "\x1b[01;32mOutput: \x1b[0;0m4 DP-10 36ef\n\tenabled\n",
+                       "show": "".join(f"dpms mode for screen DP-{i}: {m}\n" for i, m in enumerate(modes.split()))}
+            z20.subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, answers[argv[-1]], "")
+            try:
+                self.assertEqual(z20.screens(), seen)
+            finally:
+                z20.subprocess.run = old
+
+    def test_the_lid(self):
+        changed = b"/org/freedesktop/UPower: org.freedesktop.DBus.Properties.PropertiesChanged ('org.freedesktop.UPower', "
+        battery = (b"/org/freedesktop/UPower/devices/battery_BAT0: org.freedesktop.DBus.Properties.PropertiesChanged "
+                   b"('org.freedesktop.UPower.Device', {'LidIsClosed': <true>}, @as [])")  # not the daemon's
+        self.assertEqual([z20.lid_closed(line) for line in (changed + b"{'LidIsClosed': <true>}, @as [])",
+                                                             changed + b"{'OnBattery': <false>, 'LidIsClosed': <false>}, @as [])",
+                                                             changed + b"{'OnBattery': <true>}, @as [])", battery)],
+                         [True, False, None, None])
 
 class Commands(unittest.TestCase):
     """main() with a stand-in keyboard: what the commands print."""

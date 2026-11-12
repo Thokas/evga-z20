@@ -12,6 +12,9 @@ hidraw.
 - **Software effects:** aurora, fire, rain, ripple, scanner and a color
   gradient, worked out by `z20` and sent 25 times a second over the lighting,
   as a user service that also starts after login
+- **Keyboard light:** a brightness of the Z20's own, dark while KDE Plasma
+  has its keyboard light off (when the screen dims or goes off), as a user
+  service; also an LED that UPower offers as a keyboard light
 - **Profiles and Game Mode:** switch profiles 1–9, turn Game Mode on or off
 - **Backup and restore** of all nine profiles and the stored macros
 - **Keys:** see and change what any key does, also the macro keys E1–E5 and
@@ -100,6 +103,8 @@ z20 animate fire                      a software effect, until Ctrl+C: aurora, f
                                       [--brightness P]
 z20 animate fire --save | --live      as the z20-animate service: also after login, or for now
 z20 animate off | reload | --json     stop it; back to the saved one; what runs
+z20 backlight 60 | up | down          the Z20's own keyboard light, dark while the desktop
+                                      has its off (a service, see Keyboard light)
 z20 sensor [--json]                   presence sensor settings and the distance now
 z20 sensor watch                      distance, present / away and keyboard events, live
 z20 sensor on | off | distance 45     present: closer than 45 cm (10-120)
@@ -219,6 +224,58 @@ service: `journalctl --user -u z20-animate`).
 `z20 animate reload` (back to the saved one) or logging out. While one
 runs, `z20 light` changes the lighting underneath it.
 
+### Keyboard light
+
+The Z20 has a keyboard light of its own: a level, in percent of how the
+lighting is set, that the `z20-backlight` user service keeps. It goes along
+with the desktop's keyboard light: when KDE Plasma dims the screens while
+you're away, the Z20 dims as much (to 30 % of its level); when it turns them
+off, or its keyboard light is switched off otherwise (its slider at 0), the
+Z20 is dark. It comes back with the screens.
+
+```
+z20 backlight 60                              the Z20 at 60 % (enables the service)
+z20 backlight up | down                       10 % more or less, for a shortcut
+z20 backlight [--json]                        the level, and whether the service runs
+journalctl --user -u z20-backlight -f         what it does
+```
+
+The EVGA Z20 widget has a slider for it. It dims the keyboard's own
+lighting in RAM only, never what is stored (`z20 light` shows the lighting
+as set, and "dimmed to 60 %"), software effects (which pause while it's
+dark) and the colors of `z20 color`. Changes while it dims, with `z20` or
+the keyboard's Fn keys, are dimmed as well. Stopped, the service leaves the
+lighting as it is set. The keyboard's own brightness (Fn + Up / Down) comes
+on top.
+
+With the `uleds` module and the udev rule (see Install), the level is also
+an LED of its own, `evga_z20::kbd_backlight`, which UPower offers as a
+keyboard light next to a laptop's. Whatever sets UPower's keyboard lights
+can set it:
+
+```
+busctl --system call org.freedesktop.UPower /org/freedesktop/UPower/KbdBacklight/evga_z20ookbd_backlight \
+    org.freedesktop.UPower.KbdBacklight SetBrightness i 40
+```
+
+Plasma 6.6 shows only one keyboard light, UPower's first: a laptop's own.
+From UPower 1.91.4 on, that one sets all keyboard lights at once, so there
+Plasma's slider moves the Z20 as well. Without the LED, `z20 backlight` works
+the same, only UPower doesn't know it.
+
+From the desktop's keyboard light, z20 takes only off and on, and only when
+the desktop sets it: a laptop's own key for its light leaves the Z20 alone.
+Plasma only turns its keyboard light off, also when it dims the screens, so
+z20 then asks `kscreen-doctor` how far the screens are dimmed and whether
+they are off (elsewhere, off is off).
+Plasma also turns its keyboard light off when the lid closes (for the
+laptop's own keys, even with screens attached); the Z20 stays lit then.
+Plasma turns its keyboard light off when idle only if it is on, so with a
+laptop's light switched off by its own key, the Z20 stays lit when the screen
+dims. On a desktop computer without a keyboard light, Plasma has none to turn
+off. Dark with the desktop's keyboard light also means dark for a presence
+`away light`.
+
 ### Presence service
 
 `z20 presence` watches the sensor and acts on the desktop each time you
@@ -312,13 +369,15 @@ git clone https://github.com/Thokas/evga-z20.git && cd evga-z20
 # once, as root: let the logged-in user reach the keyboard's configuration interface
 sudo install -m644 udev/70-evga-z20.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw --action=change
+# optional, for z20 backlight's LED: the uleds module, now and at boot
+sudo install -m644 modules-load.d/evga-z20.conf /etc/modules-load.d/ && sudo modprobe uleds
 z20 backup                       # keep a copy of how the keyboard is set up now
 ```
 
 Needs Python 3.8 or newer and a desktop session with systemd-logind (the rule
 uses `uaccess`). The rule opens only USB interface 1, which carries the
 configuration reports; the two interfaces that carry your keystrokes stay
-root-only.
+root-only. It also opens `/dev/uleds`, for the keyboard light's LED.
 
 ## Safety
 
@@ -346,7 +405,9 @@ macros stay in the keyboard, also on other computers, so check with
 `z20 status` if something types on its own. Chrome and other Chromium
 browsers can reach the interface through WebHID, but only after you pick the
 keyboard in the browser's device chooser: don't allow a website "EVGA Z20".
-Without the rule, `z20` works only as root.
+Without the rule, `z20` works only as root. Through `/dev/uleds` such a
+program can also add LEDs of its own (which can confuse UPower), but not
+change the ones there are.
 
 ## How it works
 
@@ -374,9 +435,9 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 ## Uninstall
 
 ```
-systemctl --user disable --now z20-presence.service z20-animate.service
-rm ~/.local/bin/z20 ~/.config/systemd/user/z20-presence.service ~/.config/systemd/user/z20-animate.service
-sudo rm /etc/udev/rules.d/70-evga-z20.rules
+systemctl --user disable --now z20-presence.service z20-animate.service z20-backlight.service
+rm ~/.local/bin/z20 ~/.config/systemd/user/z20-{presence,animate,backlight}.service
+sudo rm /etc/udev/rules.d/70-evga-z20.rules /etc/modules-load.d/evga-z20.conf
 rm -r ~/.local/state/z20         # the backups too
 ```
 

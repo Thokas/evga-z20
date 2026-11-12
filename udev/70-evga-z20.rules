@@ -8,3 +8,8 @@
 # where it exists); uaccess has to be tagged before 73-seat-late.rules, hence 70-.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3842", ATTRS{idProduct}=="260a|260c|2610|2617", IMPORT{builtin}="usb_id"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3842", ATTRS{idProduct}=="260a|260c|2610|2617", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"
+
+# z20 backlight: the logged-in user may give the Z20 a keyboard light of its own, an LED through
+# the kernel's uleds (loaded at boot: modules-load.d/evga-z20.conf), which UPower then offers.
+# It lets any program in the desktop session add LEDs; it can't change other LEDs.
+KERNEL=="uleds", SUBSYSTEM=="misc", TAG+="uaccess"

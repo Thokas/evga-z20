@@ -1,0 +1,13 @@
+[Unit]
+Description=EVGA Z20 keyboard light: its level, off with the desktop's (z20 backlight)
+Documentation=https://github.com/Thokas/evga-z20
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/z20 backlight run
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

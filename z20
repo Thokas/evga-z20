@@ -58,6 +58,14 @@
   z20 animate off [--live]              stop it; --live: only until z20 animate reload or the
                                         next login
   z20 animate reload                    back to the saved effect (--save), or none
+  z20 backlight [--json]                the Z20's keyboard light: its level, and whether the
+                                        z20-backlight service keeps it
+  z20 backlight P | up | down           the lighting at P percent of how it is set (0-100; up,
+                                        down: 10 more or less), dark while the desktop has its
+                                        keyboard light off (KDE Plasma, GNOME: when the screen
+                                        dims or goes off); kept by the z20-backlight service,
+                                        which this enables
+  z20 backlight run                     what that service runs, until stopped
   z20 sensor [--json]                   the presence sensor's settings and the distance now
   z20 sensor watch [--json]             distance and presence as they change, and what the
                                         keyboard reports, until Ctrl+C
@@ -160,6 +168,12 @@ EFFECT_COLORS = {1: (P_STATIC + 16, 1, 4), 2: (P_BREATHING + 18, 2, 5), 3: (P_PU
                  4: (P_SPIRAL + 19, 8, 4), 5: (P_WAVE + 19, 8, 4), 7: (P_TRIGGER + 19, 8, 4),
                  16: (P_FADE + 16, 1, 4), 17: (P_ROWS + 17, 7, 4)}
 P_STARS_BRIGHTNESS = P_STARS + 18
+# Every brightness byte of an effect (what z20 backlight dims): its colors', pulse's background
+# color's (after on hold % and off hold %), stars' own.
+BRIGHTNESS_AT = {mode: [offset + i * size + size - 4 for i in range(count)]
+                 for mode, (offset, count, size) in EFFECT_COLORS.items()}
+BRIGHTNESS_AT[3].append(P_PULSE + 21)
+BRIGHTNESS_AT[6] = [P_STARS_BRIGHTNESS]
 # --direction: the wave's and the spiral's (stored where EFFECT_SUB points)
 DIRECTIONS = {5: {"up": 0, "down": 1, "right": 2, "left": 3}, 4: {"cw": 0, "ccw": 1}}
 
@@ -347,6 +361,7 @@ class Keyboard:
         if lock:
             fcntl.flock(self.fd, fcntl.LOCK_EX)
         self.changed = False  # previous/ is emptied before this run's first change
+        self.relit = False  # the lighting in RAM changed: z20 backlight dims it once this run lets go
 
     def save_previous(self, reports):
         """Keep what a change replaces in previous/, which holds the last run's changes only:
@@ -360,6 +375,8 @@ class Keyboard:
 
     def close(self):
         os.close(self.fd)
+        if self.relit:
+            nudge_backlight()
 
     def call(self, request, wait):
         """Send a feature report, wait for the keyboard and return its answer in that report."""
@@ -410,10 +427,13 @@ class Keyboard:
         report[8:8 + len(data)] = data
         report[7] = checksum(report)
         self.send(report)
+        self.relit = True
         if self.read_ram(block) != bytes(report[8:]):
             raise Z20Error(f"the lighting in RAM (block {block:02x}) reads back different; z20 light reload")
 
     def general(self, command, sub=READ, value=0, wait=0.005):
+        if sub == WRITE and command in (0x06, 0x08):  # another profile, a reload: the lighting from flash
+            self.relit = True
         return self.call(bytes([4, *HEADER, command, sub, 0, 0, value]), wait)
 
     def firmware(self):
@@ -1226,12 +1246,16 @@ def presence(dry_run):
 
 def with_ram_lighting(kb, p, effect):
     """The stored profile p with the lighting in RAM over it: the effect number and the
-    settings of `effect` (a number), as far as the RAM has them."""
+    settings of `effect` (a number), as far as the RAM has them, without z20 backlight's dimming."""
     p = bytearray(p)
     p[P_EFFECT:P_EFFECT + 2] = kb.read_ram(RAM_EFFECT)[:2]
     if effect in RAM_BLOCKS:
         block, at, size = RAM_BLOCKS[effect]
-        p[at:at + size] = kb.read_ram(block)[:size]
+        ram = kb.read_ram(block)[:size]
+        state = backlight_state()
+        if state and state["effect"] == effect and state["shown"] == ram.hex():
+            ram = bytes.fromhex(state["block"])  # as it is set
+        p[at:at + size] = ram
     return p
 
 
@@ -1274,6 +1298,13 @@ def color_frame(frame, pairs, brightness):
     for leds, color in pairs:
         for pos in led_targets(leds):
             frame[pos * 4:pos * 4 + 4] = bytes([level, *parse_color(color)])
+    return frame
+
+
+def dimmed_frame(frame, percent):
+    """The LED frame with every brightness at percent of its own."""
+    frame = bytearray(frame)
+    frame[0::4] = bytes(round(b * percent / 100) for b in frame[0::4])
     return frame
 
 
@@ -1509,35 +1540,48 @@ def screen_locked(desktop):
     return answer.split() == ["b", "true"]
 
 
-def animation_state():
-    """What z20 animate runs now ({pid, effect, colors, cycle_ms, brightness, how}), or None."""
+def process_state(path, command):
+    """The JSON state a running z20 command (animate, backlight) keeps in path, or None once its
+    process has ended."""
     try:
-        with open(ANIMATION_STATE) as f:
+        with open(path) as f:
             state = json.load(f)
         with open(f"/proc/{int(state['pid'])}/cmdline", "rb") as f:
-            if b"animate" not in f.read():  # that process ended, and the number went to another
-                return None
+            argv = f.read().split(b"\0")
+        if command.encode() not in argv or not any(a.endswith(b"z20") for a in argv):
+            return None  # that process ended, and the number went to another
     except (OSError, ValueError, KeyError, TypeError):
         return None
     return state
 
 
-def end_animation():
-    """Stop the z20 animate that runs (it shows the profile's lighting again when it ends)."""
-    state = animation_state()
+def animation_state():
+    """What z20 animate runs now ({pid, effect, colors, cycle_ms, brightness, how}), or None."""
+    return process_state(ANIMATION_STATE, "animate")
+
+
+def end_process(read_state):
+    """Stop the z20 run that read_state() names, and wait (up to 3 s) until it has ended."""
+    state = read_state()
     if not state or state["pid"] == os.getpid():
         return
     os.kill(state["pid"], signal.SIGTERM)
     for _ in range(30):
         time.sleep(0.1)
-        if not animation_state():
+        if not read_state():
             return
+
+
+def end_animation():
+    """Stop the z20 animate that runs (it shows the profile's lighting again when it ends)."""
+    end_process(animation_state)
 
 
 def run_animation(effect, colors, cycle, brightness, how):
     """Send the effect's frames until stopped (Ctrl+C, SIGTERM, a new z20 animate). It holds
     the keyboard only while sending a frame, so other z20 runs go on in between; it pauses
-    while the screen is locked and while the keyboard is unplugged."""
+    while the screen is locked, while the keyboard is unplugged and while z20 backlight has the
+    lighting off, and is as much dimmer as z20 backlight dims."""
     end_animation()
 
     def stop(_signum, _frame):
@@ -1548,6 +1592,7 @@ def run_animation(effect, colors, cycle, brightness, how):
     colors_at = None  # once the keyboard is there: its layout (ISO or ANSI)
     level = 0xFF if brightness is None else round(brightness * 255 / 100)
     desktop, kb, shown, sent, locked, looked, trouble = Desktop(), None, None, 0.0, False, -10.0, None
+    dark = False  # z20 backlight has the lighting off
     say = lambda text: print(f"{time.strftime('%H:%M:%S')}  {text}", flush=True)
     say(f"z20 animate {effect}: running")
     start = time.monotonic()
@@ -1561,6 +1606,10 @@ def run_animation(effect, colors, cycle, brightness, how):
                 checked = time.monotonic() - now
                 if locked != was:
                     say("screen locked: paused, the profile's lighting shows" if locked else "screen unlocked: on again")
+            percent = backlight_percent()
+            if (percent == 0) != dark:
+                dark = not dark
+                say("keyboard light off: paused" if dark else "keyboard light on: on again")
             try:
                 if kb is None:
                     kb = Keyboard(lock=False)
@@ -1570,13 +1619,13 @@ def run_animation(effect, colors, cycle, brightness, how):
                 if colors_at is None:
                     layout = led_layout(iso=kb.model.endswith("ISO"))
                     colors_at = animation(effect, [tuple(parse_color(c)) for c in colors], cycle, layout)
-                if locked:
+                if locked or dark:
                     if shown is not None:
-                        kb.send_locked(bytes([6, *HEADER, 0]))  # the profile's lighting while locked
+                        kb.send_locked(bytes([6, *HEADER, 0]))  # the profile's lighting (dark: dimmed to 0)
                         shown = None
                     time.sleep(0.5)
                     continue
-                frame = animation_frame(colors_at(now - start), level)
+                frame = animation_frame(colors_at(now - start), round(level * percent / 100))
                 if frame != shown or now - sent >= 1:  # still effects: once a second
                     waited = kb.send_locked(color_report(frame))
                     shown, sent = frame, now
@@ -1611,8 +1660,9 @@ def run_animation(effect, colors, cycle, brightness, how):
 
 def save_json(path, data):
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+    with open(os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
         json.dump(data, f)
+    os.replace(path + ".new", path)  # z20 animate reads the backlight's every frame: never half of it
 
 
 def write_animation(path, effect, colors, cycle, brightness):
@@ -1666,7 +1716,7 @@ def systemctl(*args, check=False):
         return ""
     if check and done.returncode:
         raise Z20Error(f"systemctl --user {' '.join(args)}: {done.stderr.strip() or done.returncode}"
-                       + (" (install.sh installs the z20-animate service)" if "not found" in done.stderr else ""))
+                       + (" (install.sh installs the z20 services)" if "not found" in done.stderr else ""))
     return done.stdout.strip()
 
 
@@ -1715,6 +1765,343 @@ def animate_command(v, args):
         return started(effect)
     run_animation(effect, colors, cycle, args.brightness, "here")
     return None
+
+
+# z20 backlight: the Z20's own keyboard light, a level (percent of how the lighting is set) that
+# the z20-backlight service keeps, and off while the desktop has its keyboard light off. The desktop's
+# is UPower's keyboard backlight, which KDE Plasma (PowerDevil) and GNOME set: their slider, the
+# brightness keys, off when the screen dims or goes off while idle. PowerDevil knows one keyboard
+# light, UPower's first (a laptop's own; from UPower 1.91.4 on all of them at once), and z20 takes
+# from it only off and on again, as the desktop sets it (UPower: 'external'), not what the laptop
+# does itself ('internal': its own Fn key; a ThinkPad with the lid closed puts its last level back
+# when set to 0). Nor the off that comes with closing the lid: PowerDevil turns the laptop's keys
+# dark then, even with screens attached. The same off comes when PowerDevil dims the screens while
+# idle: z20 then asks kscreen-doctor (KDE) and dims the Z20 as much as the screens are (30 %), and
+# turns it off with the screens. Where the kernel's uleds may be used, the level is also an LED of
+# its own, which UPower offers as a keyboard light (and systemd-backlight may keep).
+LID_OFF_S = 3  # an off this soon after the lid closed is the lid's
+# After the desktop's off, look at the screens then (KWin has dimmed them within about half a
+# second), again, and so on while they are dimmed.
+SCREENS_S = (0.5, 2, 20)
+UPOWER_KBD = ("org.freedesktop.UPower", "/org/freedesktop/UPower/KbdBacklight", "org.freedesktop.UPower.KbdBacklight")
+BACKLIGHT_STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or STATE, "z20-backlight.json")
+BACKLIGHT_LEVEL = os.path.join(STATE, "backlight.json")  # z20 backlight P: the level, kept over logins
+BACKLIGHT_SERVICE = "z20-backlight.service"
+ULEDS = "/dev/uleds"
+LED_NAME = "evga_z20::kbd_backlight"  # max 100: the level
+UPOWER_LED = UPOWER_KBD[1] + "/" + LED_NAME.replace(":", "o")  # as UPower names its object
+COLORS = os.path.join(STATE, "colors.bin")  # z20 color: the colors per LED, as set
+
+
+def backlight_state():
+    """What z20 backlight does now: {pid, percent (how bright it has the lighting), level, off (the
+    desktop's keyboard light), led (it has its LED), and the effect it dims in RAM with that block
+    as set and as shown (hex)}, or None if it doesn't run."""
+    return process_state(BACKLIGHT_STATE, "backlight")
+
+
+def backlight_percent():
+    """How bright z20 backlight has the lighting, in percent of how it is set: 100 without it."""
+    state = backlight_state()
+    return state["percent"] if state else 100
+
+
+def backlight_level():
+    """The Z20's keyboard light as set with z20 backlight P: 100 until then."""
+    try:
+        with open(BACKLIGHT_LEVEL) as f:
+            return min(max(int(json.load(f)["percent"]), 0), 100)
+    except (OSError, ValueError, KeyError, TypeError):
+        return 100
+
+
+def backlight_info():
+    """{percent: the level, shown: how bright the lighting is, off: the desktop's keyboard light is
+    off, dimmed: with the screens, service: z20-backlight runs, led: it has its LED}."""
+    state = backlight_state() or {}
+    return {"percent": backlight_level(), "shown": state.get("percent", 100), "off": state.get("off", False),
+            "dimmed": 0 < state.get("dim", 1) < 1, "service": bool(state), "led": state.get("led", False)}
+
+
+def backlight_text(info):
+    if not info["service"]:
+        return f"keyboard light {info['percent']} %, but z20-backlight doesn't run: the lighting shows as set"
+    return f"keyboard light {info['percent']} %" + ("; dark while the desktop has its keyboard light off"
+                                                    if info["off"] else f"; {info['shown']} % while the desktop "
+                                                    "dims its screens" if info["dimmed"] else "")
+
+
+def upower_set(path, value):
+    """Set one of UPower's keyboard lights (UPower writes it, as root); False if it has none there."""
+    try:
+        return subprocess.run(["busctl", "--system", "call", UPOWER_KBD[0], path, UPOWER_KBD[2], "SetBrightness",
+                               "i", str(value)], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def set_backlight(word):
+    """z20 backlight P | up | down: the level saved, on its LED, and z20-backlight told (or enabled,
+    as it keeps the level). Returns the level."""
+    level = backlight_level()
+    level = min(100, level + 10) if word == "up" else max(0, level - 10) if word == "down" else int(word)
+    save_json(BACKLIGHT_LEVEL, {"percent": level})
+    state = backlight_state()
+    if state:
+        try:
+            os.kill(state["pid"], signal.SIGUSR2)
+        except OSError:
+            pass
+        upower_set(UPOWER_LED, level)  # its LED in step, through UPower (it writes the LED as root)
+        return level
+    systemctl("enable", "--now", BACKLIGHT_SERVICE, check=True)  # it gives its LED the level itself
+    for _ in range(30):  # it takes a moment to start
+        if backlight_state():
+            break
+        time.sleep(0.1)
+    return level
+
+
+def nudge_backlight():
+    """The lighting in RAM changed: z20 backlight, while it dims, dims the new one at once."""
+    state = backlight_state()
+    if state and state["pid"] != os.getpid() and state["percent"] < 100:
+        try:
+            os.kill(state["pid"], signal.SIGUSR1)
+        except OSError:
+            pass
+
+
+def dimmed(block, effect, percent):
+    """A RAM lighting block of `effect` as set (from the effect's start in the profile) with its
+    brightness bytes at percent."""
+    block = bytearray(block)
+    at = RAM_BLOCKS[effect][1]
+    for i in BRIGHTNESS_AT.get(effect, ()):
+        block[i - at] = round(block[i - at] * percent / 100)
+    return bytes(block)
+
+
+class Dimmer:
+    """Dims the keyboard's own lighting in RAM: the running effect's brightness bytes, to a
+    percent of how it is set. RAM no longer holding what it wrote means a new lighting (z20 light,
+    a profile switch, the Fn keys, a reload), which it then takes as set; an effect left behind
+    gets its block back as it was set."""
+
+    def __init__(self):
+        self.effect, self.base, self.shown = None, None, None  # the effect it dims, as set, as shown
+
+    def apply(self, kb, percent):
+        effect = kb.read_ram(RAM_EFFECT)[0]
+        if self.effect is not None and self.effect != effect:
+            block, _, size = RAM_BLOCKS[self.effect]
+            ram = bytearray(kb.read_ram(block))
+            if ram[:size] == self.shown != self.base:
+                ram[:size] = self.base
+                kb.write_ram(block, ram)
+            self.effect = None
+        if effect in RAM_BLOCKS:
+            block, _, size = RAM_BLOCKS[effect]
+            ram = bytearray(kb.read_ram(block))
+            if effect != self.effect or ram[:size] != self.shown:
+                self.base = bytes(ram[:size])
+            self.effect, self.shown = effect, dimmed(self.base, effect, percent)
+            if ram[:size] != self.shown:
+                ram[:size] = self.shown
+                kb.write_ram(block, ram)
+
+    def state(self):
+        if self.effect is None:
+            return {"effect": None, "block": None, "shown": None}
+        return {"effect": self.effect, "block": self.base.hex(), "shown": self.shown.hex()}
+
+    def resume(self, state):
+        """Go on from the state a z20 backlight that was killed left: RAM may still be dimmed."""
+        if state.get("effect") in RAM_BLOCKS:
+            self.effect, self.base, self.shown = state["effect"], bytes.fromhex(state["block"]), bytes.fromhex(state["shown"])
+
+
+def show_colors(kb, percent):
+    """The colors per LED of z20 color again, at percent, unless z20 animate covers them."""
+    if os.path.exists(COLORS) and not animation_state():
+        with open(COLORS, "rb") as f:
+            kb.send(color_report(dimmed_frame(f.read(), percent)))
+
+
+def desktop_set(line):
+    """The keyboard light the desktop set, from a line of gdbus monitor on UPower: on its first
+    keyboard light, the one PowerDevil knows. None for other lines: the laptop's own changes, the
+    other keyboard lights (the Z20's LED among them)."""
+    m = re.fullmatch(re.escape(UPOWER_KBD[1].encode()) + rb": org\.freedesktop\.UPower\.KbdBacklight\."
+                     rb"BrightnessChangedWithSource \((\d+), '(\w+)'\)", line.rstrip())
+    return int(m[1]) if m and m[2] == b"external" else None
+
+
+def lid_closed(line):
+    """True if a line of gdbus monitor on UPower says the laptop's lid was closed, False if opened,
+    else None."""
+    if not line.startswith(b"/org/freedesktop/UPower: org.freedesktop.DBus.Properties.PropertiesChanged "):
+        return None
+    m = re.search(rb"'LidIsClosed': <(true|false)>", line)
+    return m[1] == b"true" if m else None
+
+
+def screens():
+    """How the desktop has its screens, from kscreen-doctor (KDE): (all of them off, how far it
+    dims them: 0.3 for 30 %, 1 for not at all); (False, 1.0) where it can't tell."""
+    def run(*args):
+        try:
+            return subprocess.run(["kscreen-doctor", *args], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+    ratios = []
+    for output in re.split(r"(?m)^Output: ", re.sub(r"\x1b\[[0-9;]*m", "", run("-o")))[1:]:  # without its colors
+        m = re.search(r"dimming to (\d+)%", output)
+        if m and re.search(r"(?m)^\s*enabled\s*$", output):
+            ratios.append(int(m[1]) / 100)
+    modes = re.findall(r"dpms mode for screen \S+: (\w+)", run("--dpms", "show"))
+    return bool(modes) and "on" not in modes, min(ratios, default=1.0)
+
+
+def backlight():
+    """Keep the lighting at the Z20's level until stopped, dimmed with the screens and dark while
+    the desktop has its keyboard light off otherwise: the keyboard's own in RAM (never stored), z20
+    animate's frames (they pause at 0) and z20 color's. Hears of the level through SIGUSR2 (z20
+    backlight P) and its LED, of the desktop through gdbus monitor, of z20's own lighting changes
+    through SIGUSR1 (nudge_backlight); while dimmed it looks every second whether the keyboard
+    changed the lighting itself (Fn keys, unplugged). Stopped, it leaves the lighting as it is set."""
+    say = lambda text: print(f"{time.strftime('%H:%M:%S')}  {text}", flush=True)
+    end_process(backlight_state)  # one at a time: a second would take the first one's dimming as set
+    dimmer, applied = Dimmer(), 100  # applied: the percent the keyboard has; it starts as set
+    try:
+        with open(BACKLIGHT_STATE) as f:  # left by one that was killed
+            dimmer.resume(json.load(f))
+        applied = None
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    level, led, synced = backlight_level(), None, None
+    # dark: the desktop has its keyboard light off; dim: how much of the level that leaves (1, 0.3 while
+    # it dims the screens, 0); look: when to look at the screens next, looks: how often it did since
+    dark, dim, look, looks = False, 1.0, None, 0
+    try:
+        led = os.open(ULEDS, os.O_RDWR)
+        os.write(led, LED_NAME.encode().ljust(64, b"\0") + (100).to_bytes(4, sys.byteorder))
+        # What it reads in the first moments is systemd-backlight bringing back the last login's
+        # level; z20's own counts, and goes to the LED through UPower once it has the LED.
+        synced = time.monotonic() + 2
+    except OSError as e:
+        if led is not None:
+            os.close(led)
+            led = None
+        say(f"no keyboard light of its own ({ULEDS}: {e.strerror}; see the README)")
+    try:
+        monitor = subprocess.Popen(["gdbus", "monitor", "--system", "--dest", UPOWER_KBD[0]],
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        raise Z20Error(f"gdbus: {e.strerror} (it comes with GLib: libglib2.0-bin, glib2)") from None
+    wake_r, wake_w = os.pipe()  # signals wake the select below
+    os.set_blocking(wake_w, False)
+
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGUSR1, lambda _signum, _frame: None)
+    signal.signal(signal.SIGUSR2, lambda _signum, _frame: None)
+    signal.set_wakeup_fd(wake_w)
+    stops = {signal.SIGTERM, signal.SIGINT}  # held back while it changes the lighting: never half done
+
+    def light(percent):
+        nonlocal applied
+        signal.pthread_sigmask(signal.SIG_BLOCK, stops)
+        try:
+            kb = Keyboard()
+            try:
+                dimmer.apply(kb, percent)
+                if applied != percent:
+                    show_colors(kb, percent)
+                applied = percent
+            finally:
+                kb.close()
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, stops)
+
+    said, saved, trouble, pending, lid = None, None, None, b"", float("-inf")  # lid: when it closed
+    try:
+        while True:
+            now = time.monotonic()
+            if synced is not None and now >= synced:
+                synced = None if upower_set(UPOWER_LED, level) else now + 5  # UPower may not have it yet
+            if dark and look is not None and now >= look:
+                screens_off, ratio = screens()
+                dim = ratio if 0 < ratio < 1 and not screens_off else 0.0
+                looks += 1
+                look = now + SCREENS_S[min(looks, 2)] if looks == 1 or 0 < dim < 1 else None
+            if (level, dim) != said:
+                say(f"keyboard light {level} %" + ("" if dim == 1 else ": dark, the desktop has its keyboard light off"
+                                                    if dim == 0 else f": {dim:.0%} of it, the desktop dims its screens"))
+                said = (level, dim)
+            percent = round(level * dim)
+            if percent < 100 or applied != percent:
+                try:
+                    light(percent)
+                    if trouble:
+                        say("keyboard back")
+                        trouble = None
+                except Z20Error as e:
+                    if str(e) != trouble:
+                        say(f"waiting for the keyboard: {e}")
+                        trouble = str(e)
+                    applied = None if percent < 100 else percent  # plugged in again, it starts as set
+            state = {"pid": os.getpid(), "percent": percent, "level": level, "off": dim == 0, "dim": dim,
+                     "led": led is not None, **dimmer.state()}
+            if state != saved:
+                save_json(BACKLIGHT_STATE, state)
+                saved = state
+            timeout = None if applied == percent == 100 else 2 if trouble else 1
+            for at in (synced, look):
+                if at is not None:
+                    timeout = max(0.0, at - now if timeout is None else min(timeout, at - now))
+            ready = select.select([monitor.stdout, wake_r, *([led] if led is not None else [])], [], [], timeout)[0]
+            if wake_r in ready and signal.SIGUSR2 in os.read(wake_r, 64):  # z20 backlight P: light it
+                level, dark, dim, look = backlight_level(), False, 1.0, None
+            if led is not None and led in ready:
+                value = int.from_bytes(os.read(led, 4), sys.byteorder, signed=True)
+                if synced is None and 0 <= value <= 100 and value != level:  # set through UPower
+                    level = value
+                    save_json(BACKLIGHT_LEVEL, {"percent": level})
+            if monitor.stdout in ready:
+                data = os.read(monitor.stdout.fileno(), 4096)
+                if not data:
+                    raise Z20Error("gdbus monitor ended")
+                *lines, pending = (pending + data).split(b"\n")
+                for line in lines:
+                    if lid_closed(line):
+                        lid = time.monotonic()
+                    elif desktop_set(line) == 0 and time.monotonic() - lid < LID_OFF_S:
+                        say("the lid closed: the desktop has its keyboard light off for the laptop's keys, "
+                            "the Z20 stays lit")
+                    elif desktop_set(line) == 0:  # off, or the screens dim or go off: look at them
+                        dark, look, looks = True, time.monotonic() + SCREENS_S[0], 0
+                    elif desktop_set(line) is not None:
+                        dark, dim, look = False, 1.0, None
+    except KeyboardInterrupt:
+        pass
+    finally:
+        signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+        signal.signal(signal.SIGUSR2, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # a second one doesn't cut this short
+        signal.set_wakeup_fd(-1)
+        monitor.terminate()
+        if led is not None:
+            os.close(led)  # the LED goes; systemd-backlight keeps its level for the next login
+        if applied is not None and applied < 100:  # the lighting as it is set again
+            try:
+                light(100)
+            except Z20Error:
+                pass
+        if os.path.exists(BACKLIGHT_STATE):  # only now: a z20 backlight that waits for this one goes on
+            os.remove(BACKLIGHT_STATE)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 
 # Parts of a profile that "default" takes from the factory profile (offset, size): the effect
@@ -1825,6 +2212,7 @@ def status(kb):
     return {"model": kb.model, "firmware": kb.firmware(), "profile": n, "profile_name": profile_name(p),
             "game_mode": kb.game_mode(), "game_mode_blocks": game_keys(p), "nkro": kb.nkro(),
             "report_rate": rate_hz(p), "lighting": lighting(p), "animation": animation_info(),
+            "backlight": backlight_info(),
             "keys": keys, "changed_keys": changed, "macros": {str(m): name for m, name in names.items()}}
 
 
@@ -1946,8 +2334,8 @@ def restore(kb, directory, profile=None, macro=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("status", "macros", "macro", "profile", "rate", "nkro", "game-mode",
-                                            "key", "light", "color", "animate", "sensor", "presence", "events",
-                                            "backup", "restore"))
+                                            "key", "light", "color", "animate", "backlight", "sensor", "presence",
+                                            "events", "backup", "restore"))
     parser.add_argument("values", nargs="*", help="see above")
     parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
     parser.add_argument("--macro", type=int, choices=MACRO_SLOTS, metavar="N", help="restore: only macro N")
@@ -2001,6 +2389,9 @@ def main():
         if args.save and args.live or args.save and not (v and v[0] in ANIMATIONS) \
                 or args.live and not (v and (v[0] in ANIMATIONS or v[0] == "off")):
             parser.error("animate: --save or --live, with an effect (--live also with off)")
+    if args.command == "backlight" and not (len(v) <= 1 and (not v or v[0] in ("run", "up", "down")
+                                                            or v[0].isdigit() and int(v[0]) <= 100)):
+        parser.error("backlight: P (percent, 0-100), up, down, or run")
     if args.command == "color" and v and v != ["off"] and (len(v) % 2 or not v):
         parser.error("color: LEDS COLOR pairs, like: color w,a,s,d ff0000 all 000000; or color off")
     if args.command == "light" and v and v not in (["reload"], ["default"]):
@@ -2059,6 +2450,19 @@ def main():
             print(json.dumps(state and {k: state[k] for k in ("effect", "colors", "cycle_ms", "brightness", "how")})
                   if args.json else animation_text(state))
         return 0
+    if args.command == "backlight":
+        if v == ["run"]:
+            try:
+                backlight()
+            except KeyboardInterrupt:
+                pass
+            return 0
+        if v:
+            set_backlight(v[0])
+        info = backlight_info()
+        if args.json or not v or sys.stdout.isatty():
+            print(json.dumps(info) if args.json else backlight_text(info))
+        return 0
     if args.command in ("presence", "events"):
         if v:
             parser.error(f"{args.command} takes no values" + (" but settings, set" if args.command == "presence" else ""))
@@ -2079,7 +2483,8 @@ def main():
                       f"Game Mode {'on' if s['game_mode'] else 'off'} (blocks {', '.join(s['game_mode_blocks']) or 'nothing'}), "
                       f"{'NKRO' if s['nkro'] else '6KRO'}, {s['report_rate']} Hz")
                 print(f"lighting: {lighting_text(s['lighting'])}"
-                      + (f"; over it: {animation_text(s['animation'])}" if s["animation"] else ""))
+                      + (f"; over it: {animation_text(s['animation'])}" if s["animation"] else "")
+                      + (f"; dimmed to {s['backlight']['shown']} % (z20 backlight)" if s["backlight"]["shown"] < 100 else ""))
                 for label, key in s["keys"].items():
                     print(f"{label:7} {key['text']}")
                 if s["changed_keys"]:
@@ -2209,25 +2614,28 @@ def main():
             state = {"profile": n, **lighting(p)}
             if n == active and state != {"profile": n, **stored}:
                 state.update(live=True, stored=stored)
+            if n == active:  # what is shown: z20 backlight may dim it
+                state["backlight_percent"] = backlight_percent()
             if args.json:
                 print(json.dumps(state))
             elif not v or v == ["reload"] or sys.stdout.isatty():
                 print(f"profile {n}: {lighting_text(state)}" +
-                      (f" (live; stored: {lighting_text(stored)})" if state.get("live") else ""))
+                      (f" (live; stored: {lighting_text(stored)})" if state.get("live") else "") +
+                      (f", dimmed to {state['backlight_percent']} % (z20 backlight)"
+                       if state.get("backlight_percent", 100) < 100 else ""))
         elif args.command == "color":
-            path = os.path.join(STATE, "colors.bin")
             frame = None
             if v == ["off"]:
                 kb.send(bytes([6, *HEADER, 0]))  # stop: the profile's lighting again
-                if os.path.exists(path):
-                    os.remove(path)
+                if os.path.exists(COLORS):
+                    os.remove(COLORS)
             else:
-                if os.path.exists(path):
-                    with open(path, "rb") as f:
+                if os.path.exists(COLORS):
+                    with open(COLORS, "rb") as f:
                         frame = f.read()
                 if v:
                     frame = color_frame(frame, list(zip(v[::2], v[1::2])), args.brightness)
-                    kb.send(color_report(frame))
+                    kb.send(color_report(dimmed_frame(frame, backlight_percent())))
                     save(STATE, {"colors": frame})
             shown = colors_shown(frame) if frame else {}
             if args.json:
