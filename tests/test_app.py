@@ -60,7 +60,10 @@ class App(unittest.TestCase):
         shutil.copy(os.path.join(HERE, "app", "fake_z20"), os.path.join(home, ".local", "bin", "z20"))
         with open(os.path.join(home, "status.json"), "w") as f:
             json.dump({**STATUS, "lighting": lighting}, f)
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("QT_", "XDG_"))}
+        # Nothing of the session: no display, no session bus (D-Bus would start the desktop's services for
+        # this home), no XDG dirs.
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("QT_", "XDG_", "DBUS_"))
+               and k not in ("DISPLAY", "WAYLAND_DISPLAY")}
         env.update(HOME=home, XDG_RUNTIME_DIR=runtime, XDG_CONFIG_HOME=os.path.join(home, ".config"),
                    QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software", Z20_REPO=ROOT)
         done = subprocess.run([sys.executable, "-I", os.path.join(HERE, "app", "drive.py"), scenario, page], env=env,
