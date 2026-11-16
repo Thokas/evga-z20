@@ -31,10 +31,8 @@ KCM.SimpleKCM {
     readonly property var shownRunning: (z20.running || []).filter(p => !search.text
         || [p.program, p.name, p.cmdline].some(s => s.toLowerCase().indexOf(search.text.toLowerCase()) >= 0))
 
-    // "Work" or, for a name as from the factory ("DEFAULT 3"), "Profile 3".
     function label(n) {
-        const name = z20.profileName(n);
-        return !name || /^default \d$/i.test(name.trim()) ? i18n("Profile %1", n) : name;
+        return z20.profileLabel(n);
     }
 
     function setRules(list) {

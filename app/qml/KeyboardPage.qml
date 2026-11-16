@@ -66,10 +66,10 @@ KCM.SimpleKCM {
         QQC2.Switch {
             Kirigami.FormData.label: i18n("N-key rollover:")
             enabled: !!page.status
-            checked: !!page.status && page.status.nkro
+            checked: !!page.status && !!page.status.nkro
             onToggled: {
                 z20.setNkro(checked);
-                checked = Qt.binding(() => !!page.status && page.status.nkro);
+                checked = Qt.binding(() => !!page.status && !!page.status.nkro);
             }
         }
         QQC2.Label {

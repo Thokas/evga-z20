@@ -144,6 +144,12 @@ QtObject {
         return p ? p.name : (status && status.profile === n ? status.profile_name : "");
     }
 
+    // As a profile is shown: "Work" or, for a name as from the factory ("DEFAULT 3"), "Profile 3".
+    function profileLabel(n) {
+        const name = profileName(n);
+        return !name || /^default \d$/i.test(name.trim()) ? i18n("Profile %1", n) : name;
+    }
+
     // --- actions ---------------------------------------------------------
 
     // Options come before "--", values after it: a name or steps beginning with "-" aren't z20 options.
@@ -239,9 +245,7 @@ QtObject {
         if (same >= 0) {
             list.unshift(list.splice(same, 1)[0]);
         } else {
-            const named = profileName(status.profile);  // as from the factory ("DEFAULT 1"): "Profile 1"
-            const own = Presets.fromKeyboard(status, !named || /^DEFAULT \d$/i.test(named)
-                                                     ? i18n("Profile %1", status.profile) : named);
+            const own = Presets.fromKeyboard(status, profileLabel(status.profile));
             if (own) {
                 list.unshift(own);
             }

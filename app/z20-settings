@@ -6,7 +6,8 @@
 Opens on the page named (else the first). One at a time: run again while one is open, the open one
 shows that page and comes to the front. It changes the keyboard through z20 (~/.local/bin/z20), as
 the Plasma widget does; it needs PyQt6 and KDE's Kirigami as the distribution has them (Debian,
-Ubuntu: python3-pyqt6, qml6-module-org-kde-kirigami, qml6-module-org-kde-kcmutils).
+Ubuntu: python3-pyqt6, python3-pyqt6.qtqml, qml6-module-org-kde-kirigami, qml6-module-org-kde-kcmutils,
+qml6-module-org-kde-plasma-plasma5support).
 """
 import os
 import sys
@@ -38,7 +39,7 @@ def main():
         from PyQt6.QtNetwork import QLocalServer, QLocalSocket
         from PyQt6.QtQml import QQmlApplicationEngine
     except ImportError as e:
-        print(f"z20-settings: needs PyQt6 ({e}); Debian, Ubuntu: python3-pyqt6", file=sys.stderr)
+        print(f"z20-settings: needs PyQt6 ({e}); Debian, Ubuntu: python3-pyqt6 python3-pyqt6.qtqml", file=sys.stderr)
         return 1
 
     class I18n(QObject):
