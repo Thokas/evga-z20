@@ -1,17 +1,18 @@
 #!/bin/sh
-# Install z20 to ~/.local/bin and its services (presence, animate, backlight) to the systemd user units.
+# Install z20 to ~/.local/bin and its services (presence, animate, backlight, apps) to the systemd user units.
 # Re-run after updating.
 set -eu
 cd "$(dirname "$0")"
 
 install -Dm755 z20 ~/.local/bin/z20
-for unit in z20-presence.service z20-animate.service z20-backlight.service; do
+for unit in z20-presence.service z20-animate.service z20-backlight.service z20-apps.service; do
     install -Dm644 "systemd/$unit" ~/.config/systemd/user/"$unit"
 done
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload || true
     # running services pick up the new z20
-    systemctl --user try-restart z20-presence.service z20-animate.service z20-backlight.service || true
+    systemctl --user try-restart z20-presence.service z20-animate.service z20-backlight.service \
+        z20-apps.service || true
 fi
 
 # z20 needs the keyboard's configuration interface (one hidraw node), and z20 backlight /dev/uleds
@@ -35,4 +36,5 @@ To act on the desktop when you leave and come back (settings: ~/.config/z20/pres
   systemctl --user enable --now z20-presence.service
 Software effects over the lighting, also after the next login: z20 animate fire --save
 The Z20's own keyboard light, dark while the desktop's is off (the z20-backlight service): z20 backlight 60
+A profile while a program runs (rules: ~/.config/z20/apps.ini): z20 apps add Cyberpunk2077.exe 3; z20 apps on
 MSG

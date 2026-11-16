@@ -26,6 +26,9 @@ hidraw.
   you come and go, welcome effect) and the live distance; a service that
   locks the screen, pauses media and the like each time you leave and come
   back
+- **Profiles for programs:** while a game or other program runs, the
+  keyboard is on its profile, and back on the one from before when it ends,
+  as Unleash RGB links profiles to games (a user service)
 - **JSON output** for widgets and scripts
 
 Before every change it saves what it replaces, and after the write it reads
@@ -123,6 +126,12 @@ z20 presence settings [--json]        what it does: presence.ini with its defaul
                                       (a service, see Presence service)
 z20 presence set KEY VALUE ...        change presence.ini, like
                                       z20 presence set leave "" away-light "animate fire"
+z20 apps [--json]                     profiles for programs: the rules, and which applies now
+z20 apps add Cyberpunk2077.exe 3      while it runs, profile 3; when it ends, the one from
+                                      before (a service, see Profiles for programs)
+z20 apps remove PROGRAM | set ...     a rule less; all of them, in a new order
+z20 apps on | off                     the service that switches
+z20 apps running [--json]             what runs now, newest first, to name in a rule
 z20 backup                            profiles 1-9 and macros to ~/.local/state/z20/backups/
 z20 restore DIR [--profile N | --macro N]
                                       write profiles and macros back from a backup
@@ -373,6 +382,55 @@ To use E1-E5 as desktop shortcuts, give them keys no keyboard has, like
 F13-F18 are free; avoid F20-F23, which X keyboard maps turn into mic mute
 and touchpad on / off / toggle.
 
+### Profiles for programs
+
+As Unleash RGB links a profile to a game: while a program runs, the
+`z20-apps` user service has the keyboard on its profile, and when it ends,
+back on the profile it was on before. If you switched profiles meanwhile
+(Fn + 1-9, the widget, `z20 profile`), it leaves yours.
+
+```
+z20 apps add Cyberpunk2077.exe 3              while it runs: profile 3
+z20 apps add AppId=1091500 3                  a Steam game, by its app ID
+z20 apps on                                   start the service (also after login)
+z20 apps                                      the rules, and which one applies now
+z20 apps running                              what runs now, newest first
+journalctl --user -u z20-apps -f              what it does
+z20 apps run --dry-run                        try: says what it would do
+```
+
+The rules are in `~/.config/z20/apps.ini`, one per line, `PROGRAM = PROFILE`:
+
+```ini
+[apps]
+Cyberpunk2077.exe = 3
+AppId=1091500 = 3
+blender = 4
+*minecraft* = 5
+```
+
+PROGRAM is a process name or a word of a process's command line, with `*`
+and `?` as in the shell, in upper or lower case alike. A word is a whole
+argument or the last part of a path in one: `Cyberpunk2077.exe` names the
+game as Wine and Proton run it (`Z:\...\Cyberpunk2077.exe`), and
+`AppId=1091500` the process Steam keeps running as long as its game 1091500
+does (the number is in the game's store address; `z20 apps running` lists
+it with the game's name). `blend` doesn't name `blender`, `*minecraft*`
+names any process with minecraft in an argument. Of the programs that run,
+the first rule counts: a game that starts while another one runs takes over
+if its rule comes first, and gives back when it ends. `z20 apps add` puts a
+rule at the end (or gives the one there a new profile), `z20 apps remove`
+takes one out and `z20 apps set` writes them all, in a new order; comments
+in the file stay.
+
+The service looks at your processes every 2 s (a few milliseconds each
+time) and opens the keyboard only to switch, so other `z20` commands and
+the widget go on. It takes the file anew when it changes. While the
+keyboard is unplugged it waits, and switches once it is back. Stopped while
+a program runs (`z20 apps off`, logging out), it also goes back to the
+profile from before. A switch loads the profile's lighting, as Fn + 1-9
+does.
+
 ## Install
 
 ```
@@ -447,8 +505,8 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 ## Uninstall
 
 ```
-systemctl --user disable --now z20-presence.service z20-animate.service z20-backlight.service
-rm ~/.local/bin/z20 ~/.config/systemd/user/z20-{presence,animate,backlight}.service
+systemctl --user disable --now z20-presence.service z20-animate.service z20-backlight.service z20-apps.service
+rm ~/.local/bin/z20 ~/.config/systemd/user/z20-{presence,animate,backlight,apps}.service
 sudo rm /etc/udev/rules.d/70-evga-z20.rules /etc/modules-load.d/evga-z20.conf
 rm -r ~/.local/state/z20         # the backups too
 ```

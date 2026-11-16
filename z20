@@ -87,6 +87,17 @@
   z20 presence settings [--json]        what z20 presence does: presence.ini with its defaults
   z20 presence set KEY VALUE ...        change presence.ini (leave-after 30, leave "lock, pause-media",
                                         away-light "animate fire", ...); the rest stays as it is
+  z20 apps [--json]                     profiles for programs: while a program runs, the keyboard on
+                                        its profile, back on the one from before when it ends (rules:
+                                        ~/.config/z20/apps.ini; the first program that runs counts)
+  z20 apps add PROGRAM N | remove PROGRAM
+                                        a rule more (or N for the one there), one less; PROGRAM: a
+                                        process name (Cyberpunk2077.exe) or a word of its command line
+                                        (AppId=1091500: a Steam game), * and ? as in the shell
+  z20 apps set [PROGRAM N ...]          all the rules, in this order
+  z20 apps on | off                     the z20-apps service that switches, also after the next login
+  z20 apps running [--json]             the programs that run now, newest first, to pick from
+  z20 apps run [--dry-run]              what that service runs: looks every 2 s, until stopped
   z20 events [--json] [--wait S]        what the keyboard reports on its own: profile, effect and
                                         Game Mode changed with its keys, media keys (until Ctrl+C,
                                         or only the first event within S seconds but media keys)
@@ -1253,6 +1264,373 @@ def presence(dry_run):
             desktop.lighting_back()
 
 
+# z20 apps: profiles for programs, as Unleash RGB links a profile to a game. While the program of a rule
+# runs, the z20-apps service has the keyboard on the rule's profile; when it ends, back on the profile
+# from before, unless the keyboard was switched since (Fn keys, the widget, z20 profile). The rules are
+# apps.ini's lines PROGRAM = PROFILE; of the programs that run, the first rule counts.
+APPS_CONFIG = os.path.expanduser("~/.config/z20/apps.ini")
+APPS_STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or STATE, "z20-apps.json")  # what the service did
+APPS_SERVICE = "z20-apps.service"
+APPS_POLL_S = 2
+APPS_HEAD = """\
+# z20 apps: while a program runs, the keyboard is on a profile (the z20-apps service), and back on
+# the one from before when it ends. PROGRAM = PROFILE, one per line; of the programs that run, the
+# first one here counts. PROGRAM: a process name (Cyberpunk2077.exe, blender) or a word of its
+# command line (AppId=1091500: a Steam game), * and ? as in the shell; the case doesn't matter.
+"""
+PROC = "/proc"
+STEAM = [os.path.expanduser(p) for p in ("~/.local/share/Steam", "~/.steam/steam",
+                                         "~/.var/app/com.valvesoftware.Steam/.local/share/Steam")]
+
+
+def apps_rules(path=APPS_CONFIG, text=None):
+    """The rules of apps.ini (or of text, as it would be): [(program, profile)] in their order, none without
+    the file. A rule is a line PROGRAM = PROFILE in [apps] or before any section, split at the last "="
+    (AppId=1091500 = 2)."""
+    if text is None:
+        try:
+            with open(path) as f:
+                text = f.read()
+        except FileNotFoundError:
+            return []
+        except OSError as e:
+            raise Z20Error(f"{path}: {e.strerror}") from None
+    lines = text.splitlines()
+    rules = []
+    for i in rule_lines(lines):
+        program, _, profile = lines[i].strip().rpartition("=")
+        if not program.strip() or not re.fullmatch(r"\s*[1-9]\s*", profile):
+            raise Z20Error(f"{path}, line {i + 1}: not PROGRAM = PROFILE (1-9): {lines[i].strip()}")
+        rules.append((program.strip(), int(profile)))
+    return rules
+
+
+def rule_lines(lines):
+    """Which of apps.ini's lines are rules: not blank, no comment, in [apps] or before any section."""
+    found, section = [], None
+    for i, line in enumerate(lines):
+        text = line.strip()
+        header = re.fullmatch(r"\[([^]]*)\]", text)
+        if header:
+            section = header[1].strip().lower()
+        elif text and text[0] not in "#;" and section in (None, "apps"):
+            found.append(i)
+    return found
+
+
+def change_apps(how, words, path=APPS_CONFIG):
+    """z20 apps add PROGRAM N (a rule more at the end, or N for the one there) | remove PROGRAM |
+    set [PROGRAM N ...] (all of them, in this order): the rules in apps.ini changed, the rest of the file
+    (comments, other sections) as it is. Returns the rules."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lock = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # one change at a time, each on top of the last
+        rules = apps_rules(path)
+        same = lambda a, b: a.strip().lower() == b.strip().lower()  # as the rules match: any case
+        if how == "set":
+            new = [(words[i].strip(), int(words[i + 1])) for i in range(0, len(words), 2)]
+            twice = [p for i, (p, _) in enumerate(new) if any(same(p, q) for q, _ in new[:i])]
+            if twice:
+                raise Z20Error(f"apps set: {twice[0]} twice")
+        elif how == "add":
+            new = [(words[0].strip(), int(words[1])) if same(p, words[0]) else (p, n) for p, n in rules]
+            new += [] if any(same(p, words[0]) for p, _ in rules) else [(words[0].strip(), int(words[1]))]
+        else:
+            new = [(p, n) for p, n in rules if not same(p, words[0])]
+            if len(new) == len(rules):
+                raise Z20Error(f"no rule for {words[0]} in {path} (z20 apps lists them)")
+        write_apps(new, path)
+        return new
+    finally:
+        os.close(lock)
+
+
+def write_apps(rules, path):
+    """apps.ini with these rules where its rules were (or at the end of [apps]); comments stay."""
+    for program, _ in rules:
+        if not program or program[0] in "#;[" or "\n" in program or "\r" in program:
+            raise Z20Error(f"apps: not a program: {program!r} (a name or word, not beginning with # ; [)")
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        lines = APPS_HEAD.splitlines()
+    old = rule_lines(lines)
+    if old:
+        at = old[0]
+        lines = [line for i, line in enumerate(lines) if i not in old]
+    else:  # after the last line of [apps] that isn't blank, or a new [apps] at the end
+        start = next((i for i, line in enumerate(lines) if re.fullmatch(r"\s*\[\s*apps\s*\]\s*", line, re.I)), None)
+        if start is None:
+            lines += [""] * bool(lines and lines[-1].strip() and not lines[-1].startswith("#")) + ["[apps]"]
+            start = len(lines) - 1
+        end = next((i for i in range(start + 1, len(lines)) if re.fullmatch(r"\s*\[.*\]\s*", lines[i])), len(lines))
+        at = max([start + 1] + [i + 1 for i in range(start + 1, end) if lines[i].strip()])
+    lines[at:at] = [f"{program} = {profile}" for program, profile in rules]
+    text = "\n".join(lines) + "\n"
+    apps_rules(path, text)  # raises before anything is written
+    with open(path, "w") as f:  # in place: a symlinked file stays one
+        f.write(text)
+
+
+def program_pattern(program):
+    """A rule's PROGRAM as a regular expression: * and ? as in the shell, the rest as it is, in any case."""
+    return re.compile(re.escape(program).replace(r"\*", ".*").replace(r"\?", "."), re.I | re.S)
+
+
+def names_it(pattern, process):
+    """Whether a process is what a rule names: its name, one of its arguments, or the last part of one
+    (after / or \\: Wine's C:\\...\\Game.exe, Proton's .../Game.exe). Whole words, not a part of one."""
+    words = [process["name"], *process["argv"], *(re.split(r"[/\\]", a)[-1] for a in process["argv"])]
+    return any(pattern.fullmatch(w) for w in words)
+
+
+def process_name(comm, argv):
+    """comm, which the kernel cuts to 15 characters; where it was cut, the first argument's last part it
+    was cut from (Wine puts the program there: Cyberpunk2077.e is C:\\...\\Cyberpunk2077.exe)."""
+    first = re.split(r"[/\\]", argv[0])[-1] if argv else ""
+    return first if len(comm) == 15 and first.startswith(comm) else comm
+
+
+def processes():
+    """The user's own processes: [{pid, start (clock ticks after boot), name, argv}]; not the kernel's (no
+    command line) nor z20's own runs (a rule's program is in z20 apps add's arguments)."""
+    out = []
+    for entry in os.listdir(PROC):
+        if not entry.isdigit() or int(entry) == os.getpid():
+            continue
+        try:
+            if os.stat(os.path.join(PROC, entry)).st_uid != os.getuid():
+                continue
+            with open(os.path.join(PROC, entry, "stat"), "rb") as f:
+                stat = f.read().decode("utf-8", "replace")
+            with open(os.path.join(PROC, entry, "cmdline"), "rb") as f:
+                argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0")]
+        except OSError:
+            continue  # ended meanwhile
+        while argv and not argv[-1]:
+            argv.pop()
+        z20_run = any(os.path.basename(a) == "z20" for a in argv[:2]) or argv[1:2] == ["-c"] and "z20" in "".join(argv[2:3])
+        if not argv or z20_run:
+            continue
+        comm, rest = stat[stat.find("(") + 1:stat.rfind(")")], stat[stat.rfind(")") + 2:].split()
+        out.append({"pid": int(entry), "start": int(rest[19]), "name": process_name(comm, argv), "argv": argv})
+    return out
+
+
+def steam_name(app_id):
+    """A Steam game's name from its app manifest, in one of Steam's libraries; None where there is none."""
+    libraries = []
+    for root in STEAM:
+        libraries.append(os.path.join(root, "steamapps"))
+        try:
+            with open(os.path.join(root, "steamapps", "libraryfolders.vdf"), errors="replace") as f:
+                libraries += [os.path.join(p.replace("\\\\", "\\"), "steamapps")
+                              for p in re.findall(r'"path"\s+"([^"]*)"', f.read())]
+        except OSError:
+            pass
+    for library in dict.fromkeys(libraries):
+        try:
+            with open(os.path.join(library, f"appmanifest_{app_id}.acf"), errors="replace") as f:
+                found = re.search(r'"name"\s+"([^"]*)"', f.read())
+        except OSError:
+            continue
+        if found:
+            return found[1]
+    return None
+
+
+def rule_running(rules, procs):
+    """The first rule whose program runs, as {program, name, profile}; None if none does. Its name: the
+    Steam game's for AppId=N, else the process's where the rule names that, else the rule's program."""
+    for program, profile in rules:
+        pattern = program_pattern(program)
+        process = next((p for p in procs if names_it(pattern, p)), None)
+        if process:
+            app = re.fullmatch(r"(?i)AppId=(\d+)", program)
+            name = app and steam_name(app[1]) or (process["name"] if pattern.fullmatch(process["name"]) else program)
+            return {"program": program, "name": name, "profile": profile}
+    return None
+
+
+def running_programs():
+    """What runs now that a rule could name, the newest first, one entry each: [{program (for the rule),
+    name, cmdline (shortened), pid}]. A Steam game as AppId=N, with its name; not Wine's own programs
+    (C:\\windows\\...) nor the desktop's (its parts that systemd runs in the session and background slices)."""
+    home, found = os.path.expanduser("~"), {}
+    for p in sorted(processes(), key=lambda p: -p["start"]):
+        argv = p["argv"]
+        try:
+            with open(os.path.join(PROC, str(p["pid"]), "cgroup")) as f:
+                if re.search(r"/(session|background)\.slice/", f.read()):
+                    continue
+        except OSError:
+            continue
+        app = next((a for a in argv if re.fullmatch(r"AppId=\d+", a)), None) if "SteamLaunch" in argv else None
+        if app:  # Steam's reaper, which runs as long as the game: what it started (after its last --)
+            entry = {"program": app, "name": steam_name(app[6:]) or f"Steam app {app[6:]}"}
+            argv = argv[len(argv) - argv[::-1].index("--"):] if "--" in argv else argv
+        elif re.match(r"(?i)[a-z]:\\windows\\", argv[0]):
+            continue
+        else:
+            entry = {"program": p["name"], "name": p["name"]}
+        cmdline = " ".join(a.replace(home + "/", "~/") for a in argv)
+        if entry["program"].lower() not in found:
+            found[entry["program"].lower()] = {**entry, "cmdline": cmdline[:159] + "…" if len(cmdline) > 160
+                                               else cmdline, "pid": p["pid"]}
+    return list(found.values())
+
+
+def apps_state():
+    """What the z20-apps service did ({pid, active: the rule it switched for or None}), or None if it
+    doesn't run."""
+    return process_state(APPS_STATE, "apps")
+
+
+def apps_info():
+    """The rule the z20-apps service switched the keyboard for: {program, name, profile, before (the
+    profile it goes back to)}; None while none applies or it doesn't run."""
+    state = apps_state()
+    return state.get("active") if state else None
+
+
+def apps_settings():
+    state = apps_state()
+    return {"config": APPS_CONFIG, "exists": os.path.exists(APPS_CONFIG),
+            "rules": [{"program": p, "profile": n} for p, n in apps_rules(APPS_CONFIG)],
+            "service": bool(state), "active": state.get("active") if state else None}
+
+
+def apps_text(s):
+    width = max([len(r["program"]) for r in s["rules"]] + [0])
+    active = s["active"] or {}
+    lines = [f"{s['config']}: " + ("while a program runs, the keyboard on its profile (the first that runs counts)"
+                                   if s["rules"] else "no rules (z20 apps add PROGRAM PROFILE)")]
+    runs = "  (runs now" + (f"; back to {active['before']} when it ends" if active.get("before") != active.get("profile")
+                            else "") + ")"
+    lines += [f"  {r['program']:{width}}  profile {r['profile']}" + (runs if r["program"] == active.get("program") else "")
+              for r in s["rules"]]
+    lines.append("the z20-apps service runs" if s["service"] else "the z20-apps service doesn't run (z20 apps on)")
+    return "\n".join(lines)
+
+
+def apps_switch(on):
+    """z20 apps on | off: the z20-apps service enabled and started (it takes a moment), or stopped and
+    disabled; also one running in a terminal."""
+    if on:
+        systemctl("enable", "--now", APPS_SERVICE, check=True)
+        for _ in range(30):
+            if apps_state():
+                break
+            time.sleep(0.1)
+    else:
+        systemctl("disable", "--now", APPS_SERVICE)
+        end_process(apps_state)
+
+
+def apps_service(dry_run):
+    """Have the keyboard on a rule's profile while its program runs, and on the profile from before once it
+    ends (unless it was switched since), until stopped; stopped while a rule applies, it goes back too.
+    Looks at the processes every 2 s and opens the keyboard only to switch, so other z20 runs go on; waits
+    while the keyboard is unplugged; takes apps.ini anew when it changes."""
+    say = lambda text: print(f"{time.strftime('%H:%M:%S')}  {text}", flush=True)
+    end_process(apps_state)  # one at a time
+    active = None  # the rule it switched for: {program, name, profile, before}
+    try:
+        with open(APPS_STATE) as f:  # left by one that was killed, while the program may still run
+            active = json.load(f)["active"]
+        if not (isinstance(active["program"], str) and isinstance(active["name"], str)
+                and {active["profile"], active["before"]} <= set(range(1, 10))):
+            active = None
+    except (OSError, ValueError, KeyError, TypeError):
+        active = None
+    would = None  # --dry-run: the profile it would have switched to
+
+    def switch(want, why):
+        """Open the keyboard and switch for want, the rule that applies now (None: none); returns the new
+        active. why: what happened, for the log."""
+        nonlocal would, trouble
+        kb = Keyboard()
+        if trouble:
+            say("keyboard back")
+            trouble = None
+        try:
+            current = kb.profile_number() if would is None else would
+            if want:  # the first rule, or another than before: back to the one from before in the end
+                before = active["before"] if active and current == active["profile"] else current
+                to = want["profile"]
+            else:  # back, unless switched since
+                before, to = None, active["before"] if current == active["profile"] else current
+            if to != current:
+                if dry_run:
+                    would = to
+                else:
+                    kb.set_profile(to)
+        finally:
+            kb.close()
+        dry = " (dry run: not switched)" if dry_run and to != current else ""
+        if want:
+            say(f"{why}: profile {to}" + (" (on it already)" if to == current else "")
+                + (f", back to {before} when it ends" if before != to else "") + dry)
+            return {**want, "before": before}
+        say(f"{why}: " + (f"back to profile {to}" if to != current else f"profile {current} stays"
+                          + (", switched since" if current != active["profile"] else "")) + dry)
+        return None
+
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    stops = {signal.SIGTERM, signal.SIGINT}  # held back while it switches: what it did is always known
+    rules, loaded, saved, trouble = [], False, None, None
+    try:
+        while True:
+            try:
+                stamp = os.stat(APPS_CONFIG).st_mtime_ns
+            except OSError:
+                stamp = None
+            if stamp != loaded:  # the first time, and after each change
+                try:
+                    rules = apps_rules(APPS_CONFIG)
+                    text = ", ".join(f"{p}: profile {n}" for p, n in rules) or "no rules"
+                    say(f"rules: {text}" if loaded is not False else
+                        f"apps: {text}{' (dry run)' if dry_run else ''}; config {APPS_CONFIG}"
+                        f"{'' if stamp else ' (not there: z20 apps add PROGRAM PROFILE)'}")
+                except Z20Error as e:
+                    say(f"{e}; " + ("the rules stay as they were" if loaded is not False else "no rules until it's fixed"))
+                loaded = stamp
+            want = rule_running(rules, processes())
+            if (want and (want["program"], want["profile"])) != (active and (active["program"], active["profile"])):
+                why = f"{want['name']} runs" if want else f"{active['name']} ended" + (
+                    "" if any(p == active["program"] for p, _ in rules) else " (its rule is gone)")
+                signal.pthread_sigmask(signal.SIG_BLOCK, stops)
+                try:
+                    active = switch(want, why)
+                except (Z20Error, OSError) as e:  # unplugged: again in 2 s
+                    if str(e) != trouble:
+                        say(f"waiting for the keyboard: {e}")
+                        trouble = str(e)
+                finally:
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, stops)
+            state = {"pid": os.getpid(), "active": active}
+            if state != saved or not os.path.exists(APPS_STATE):
+                save_json(APPS_STATE, state)
+                saved = state
+            time.sleep(APPS_POLL_S)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # a second one doesn't cut this short
+        if active:
+            try:
+                switch(None, f"stopped while {active['name']} runs")
+            except (Z20Error, OSError):
+                pass
+        if os.path.exists(APPS_STATE):
+            os.remove(APPS_STATE)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
 def with_ram_lighting(kb, p, effect):
     """The stored profile p with the lighting in RAM over it: the effect number and the
     settings of `effect` (a number), as far as the RAM has them, without z20 backlight's dimming."""
@@ -2306,7 +2684,7 @@ def status(kb):
     return {"model": kb.model, "firmware": kb.firmware(), "profile": n, "profile_name": profile_name(p),
             "game_mode": kb.game_mode(), "game_mode_blocks": game_keys(p), "nkro": kb.nkro(),
             "report_rate": rate_hz(p), "lighting": lighting(p), "animation": animation_info(),
-            "backlight": backlight_info(),
+            "backlight": backlight_info(), "apps": apps_info(),
             "keys": keys, "changed_keys": changed, "macros": {str(m): name for m, name in names.items()}}
 
 
@@ -2429,7 +2807,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("status", "macros", "macro", "profile", "rate", "nkro", "game-mode",
                                             "key", "light", "color", "leds", "animate", "backlight", "sensor",
-                                            "presence", "events", "backup", "restore"))
+                                            "presence", "events", "backup", "restore", "apps"))
     parser.add_argument("values", nargs="*", help="see above")
     parser.add_argument("--profile", type=int, choices=range(1, 10), metavar="N", help="profile 1-9")
     parser.add_argument("--macro", type=int, choices=MACRO_SLOTS, metavar="N", help="restore: only macro N")
@@ -2445,7 +2823,7 @@ def main():
     parser.add_argument("--live", action="store_true", help="light: in RAM only, until z20 light reload; "
                                                              "animate: for now, as the service")
     parser.add_argument("--save", action="store_true", help="animate: as the service, also after the next login")
-    parser.add_argument("--dry-run", action="store_true", help="presence: say what it would do instead")
+    parser.add_argument("--dry-run", action="store_true", help="presence, apps run: say what it would do instead")
     parser.add_argument("--wait", type=float, metavar="S", help="events: only the first within S seconds")
     parser.add_argument("--json", action="store_true", help="print as JSON")
     args = parser.parse_intermixed_args()  # options may also stand between the values
@@ -2518,6 +2896,11 @@ def main():
             parser.error(f"macro name: 1 to {MACRO_NAME_MAX} bytes")
     if args.command == "restore" and len(v) != 1:
         parser.error("restore needs a backup directory")
+    if args.command == "apps" and v and not (v[0] == "add" and len(v) == 3 and number(v[2])
+                                             or v[0] == "remove" and len(v) == 2
+                                             or v[0] == "set" and len(v) % 2 and all(map(number, v[2::2]))
+                                             or v[0] in ("on", "off", "running", "run") and len(v) == 1):
+        parser.error("apps add PROGRAM N | remove PROGRAM | set [PROGRAM N ...] | on | off | running | run (N: 1-9)")
 
     if args.command == "presence" and v[:1] == ["set"]:
         if len(v) < 3 or len(v) % 2 == 0:
@@ -2537,6 +2920,27 @@ def main():
                   f"{'; lighting: ' + s['away_light'] if s['away_light'] else ''}\n"
                   f"  back for {s['come_after_s']:g} s: {steps('come')}"
                   f"{'; the stored lighting' if s['away_light'] else ''}")
+        return 0
+    if args.command == "apps":
+        if v == ["run"]:
+            try:
+                apps_service(args.dry_run)
+            except KeyboardInterrupt:
+                pass
+        elif v == ["running"]:
+            listed = running_programs()
+            width = min(max([len(p["program"]) for p in listed] + [0]), 28)
+            print(json.dumps(listed) if args.json else "\n".join(
+                f"{p['program']:{width}}  " + (f"{p['name']}: " if p["name"] != p["program"] else "") + p["cmdline"]
+                for p in listed))
+        else:
+            if v[:1] in (["on"], ["off"]):
+                apps_switch(v[0] == "on")
+            elif v:
+                change_apps(v[0], v[1:], APPS_CONFIG)
+            if args.json or not v or sys.stdout.isatty():
+                s = apps_settings()
+                print(json.dumps(s) if args.json else apps_text(s))
         return 0
     if args.command == "animate":
         try:
@@ -2602,6 +3006,9 @@ def main():
                 print(f"lighting: {lighting_text(s['lighting'])}"
                       + (f"; over it: {animation_text(s['animation'])}" if s["animation"] else "")
                       + (f"; dimmed to {s['backlight']['shown']} % (z20 backlight)" if s["backlight"]["shown"] < 100 else ""))
+                if s["apps"] and s["apps"]["profile"] == s["profile"]:
+                    print(f"profile {s['profile']} for {s['apps']['name']} (z20 apps)" + (
+                          f", back to {s['apps']['before']} when it ends" if s["apps"]["before"] != s["profile"] else ""))
                 for label, key in s["keys"].items():
                     print(f"{label:7} {key['text']}")
                 if s["changed_keys"]:

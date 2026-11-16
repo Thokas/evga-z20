@@ -1,0 +1,13 @@
+[Unit]
+Description=EVGA Z20 profiles for programs: the keyboard on a profile while a program runs (z20 apps)
+Documentation=https://github.com/Thokas/evga-z20
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/z20 apps run
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

@@ -1031,6 +1031,215 @@ class Colors(unittest.TestCase):
                                      (iso, z20.LED_NAMES[p], z20.LED_NAMES[q]))
 
 
+class Apps(unittest.TestCase):
+    """z20 apps: the rules in apps.ini, which processes they name, and the service that switches."""
+
+    def test_rules_from_the_file(self):
+        text = ("# mine\nblender = 5\n[apps]\nCyberpunk2077.exe = 3\nAppId=1091500 = 2\n; later\n*minecraft* =4\n\n"
+                "[other]\nnot = 1\n")
+        self.assertEqual(z20.apps_rules("apps.ini", text), [("blender", 5), ("Cyberpunk2077.exe", 3),
+                                                            ("AppId=1091500", 2), ("*minecraft*", 4)])
+        for bad in ("AppId=1091500\n", "blender = 10\n", "= 3\n", "blender = three\n", "blender 3\n", "[apps\n"):
+            with self.assertRaises(z20.Z20Error, msg=bad):
+                z20.apps_rules("apps.ini", "[apps]\n" + bad)
+        self.assertEqual(z20.apps_rules("/nonexistent/apps.ini"), [])
+
+    def test_add_remove_and_set_keep_the_rest(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "z20", "apps.ini")
+            z20.change_apps("add", ["Cyberpunk2077.exe", "3"], path)  # no file yet: with what it is
+            with open(path) as f:
+                self.assertEqual(f.read(), z20.APPS_HEAD + "[apps]\nCyberpunk2077.exe = 3\n")
+            with open(path, "w") as f:
+                f.write("# mine\n[apps]\n# games\nCyberpunk2077.exe = 3\nblender = 5\n\n[other]\nx = 1\n")
+            z20.change_apps("add", ["AppId=1091500", "2"], path)
+            z20.change_apps("add", ["CYBERPUNK2077.EXE", "4"], path)  # the same program: changed where it is
+            self.assertEqual(z20.apps_rules(path), [("CYBERPUNK2077.EXE", 4), ("blender", 5), ("AppId=1091500", 2)])
+            z20.change_apps("remove", ["Blender"], path)
+            z20.change_apps("set", ["AppId=1091500", "2", "-x-", "1", "CYBERPUNK2077.EXE", "4"], path)
+            with open(path) as f:
+                self.assertEqual(f.read(), "# mine\n[apps]\n# games\nAppId=1091500 = 2\n-x- = 1\nCYBERPUNK2077.EXE = 4\n"
+                                           "\n[other]\nx = 1\n")
+            for how, words in (("set", ["a", "1", "A", "2"]), ("add", ["#a", "1"]), ("add", ["[a]", "1"]),
+                               ("remove", ["blender"])):
+                with self.assertRaises(z20.Z20Error, msg=words):
+                    z20.change_apps(how, words, path)
+            z20.change_apps("set", [], path)
+            with open(path) as f:
+                self.assertEqual(f.read(), "# mine\n[apps]\n# games\n\n[other]\nx = 1\n")
+            z20.change_apps("add", ["blender", "5"], path)  # after the comment, before the blank line
+            with open(path) as f:
+                self.assertEqual(f.read(), "# mine\n[apps]\n# games\nblender = 5\n\n[other]\nx = 1\n")
+
+    def test_what_a_rule_names(self):
+        home = "/home/u/.local/share/Steam/steamapps/common"
+        game = {"name": z20.process_name("Cyberpunk2077.e", [r"Z:\home\u\Games\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe"]),
+                "argv": [r"Z:\home\u\Games\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe"]}
+        reaper = {"name": "reaper", "argv": ["/home/u/.local/share/Steam/ubuntu12_32/reaper", "SteamLaunch",
+                                             "AppId=1091500", "--", f"{home}/Proton 9.0 (Beta)/proton",
+                                             "waitforexitandrun", f"{home}/Cyberpunk 2077/bin/x64/Cyberpunk2077.exe"]}
+        blender = {"name": "blender", "argv": ["/usr/bin/blender", "--factory-startup"]}
+        self.assertEqual(game["name"], "Cyberpunk2077.exe")
+        for program, named in (("Cyberpunk2077.exe", [game, reaper]), ("cyberpunk2077.EXE", [game, reaper]),
+                               ("Cyberpunk*", [game, reaper]), ("Cyberpunk", []), ("2077", []),
+                               ("AppId=1091500", [reaper]), ("AppId=109150", []), ("AppId=10915000", []),
+                               ("blender", [blender]), ("/usr/bin/blender", [blender]), ("blend", []),
+                               ("blend?r", [blender]), ("*", [game, reaper, blender]), ("Proton 9.0 (Beta)", []),
+                               ("*/Proton 9.0 (Beta)/proton", [reaper]), ("*/Proton 9x0 (Beta)/proton", [])):
+            pattern = z20.program_pattern(program)
+            self.assertEqual([p for p in (game, reaper, blender) if z20.names_it(pattern, p)], named, program)
+        # comm is cut to 15 characters; a name of its own (python programs) stays
+        for comm, argv, name in (("kactivitymanage", ["/usr/libexec/kactivitymanagerd"], "kactivitymanagerd"),
+                                 ("guake", ["/usr/bin/python3", "-m", "guake"], "guake"),
+                                 ("WebKitWebProces", ["/usr/bin/other"], "WebKitWebProces"), ("bash", ["-bash"], "bash")):
+            self.assertEqual(z20.process_name(comm, argv), name)
+
+    def fake_proc(self, d, procs):
+        """A /proc of processes (pid, start, comm, argv, slice) in d."""
+        for pid, start, comm, argv, where in procs:
+            os.makedirs(os.path.join(d, str(pid)))
+            with open(os.path.join(d, str(pid), "stat"), "w") as f:
+                f.write(f"{pid} ({comm}) S 1 " + "0 " * 17 + f"{start} 0 0\n")
+            with open(os.path.join(d, str(pid), "cmdline"), "wb") as f:
+                f.write(b"".join(a.encode() + b"\0" for a in argv))
+            with open(os.path.join(d, str(pid), "cgroup"), "w") as f:
+                f.write(f"0::/user.slice/user-1000.slice/user@1000.service/{where}.slice/x.scope\n")
+
+    def test_what_runs_to_pick_from(self):
+        import tempfile
+        home = os.path.expanduser("~")
+        with tempfile.TemporaryDirectory() as d:
+            proc, steam = os.path.join(d, "proc"), os.path.join(d, "Steam")
+            game = f"{home}/.local/share/Steam/steamapps/common/Cyberpunk 2077/bin/x64/Cyberpunk2077.exe"
+            self.fake_proc(proc, [
+                (100, 50, "plasmashell", ["/usr/bin/plasmashell"], "session"),
+                (200, 1000, "dolphin", ["/usr/bin/dolphin"], "app"),
+                (201, 3000, "dolphin", ["/usr/bin/dolphin", "--new-window"], "app"),
+                (300, 5000, "reaper", ["reaper", "SteamLaunch", "AppId=1091500", "--", "/x/_v2-entry-point", "--",
+                                       f"{home}/proton", "waitforexitandrun", game], "app"),
+                (301, 5100, "Cyberpunk2077.e", ["Z:" + game.replace("/", "\\")], "app"),
+                (302, 5050, "services.exe", [r"C:\windows\system32\services.exe"], "app"),
+                (400, 10, "kworker/0:1", [], "app"),  # the kernel's: no command line
+                (500, 6000, "python3", ["/usr/bin/python3", f"{home}/.local/bin/z20", "apps", "running"], "app"),
+                (501, 6000, "sh", ["/bin/sh", "-c", "\"$HOME/.local/bin/z20\" 'apps' 'add' 'x' '1'"], "app")])
+            os.makedirs(os.path.join(steam, "steamapps"))
+            with open(os.path.join(steam, "steamapps", "appmanifest_1091500.acf"), "w") as f:
+                f.write('"AppState"\n{\n\t"appid"\t\t"1091500"\n\t"name"\t\t"Cyberpunk 2077"\n}\n')
+            old = z20.PROC, z20.STEAM
+            z20.PROC, z20.STEAM = proc, [steam]
+            try:
+                listed = z20.running_programs()
+                running = z20.rule_running([("blender", 4), ("AppId=1091500", 3), ("Cyberpunk2077.exe", 2)],
+                                           z20.processes())
+            finally:
+                z20.PROC, z20.STEAM = old
+        self.assertEqual([(p["program"], p["name"], p["pid"]) for p in listed],
+                         [("Cyberpunk2077.exe", "Cyberpunk2077.exe", 301), ("AppId=1091500", "Cyberpunk 2077", 300),
+                          ("dolphin", "dolphin", 201)])
+        self.assertEqual(listed[1]["cmdline"], "~/proton waitforexitandrun "
+                                               "~/.local/share/Steam/steamapps/common/Cyberpunk 2077/bin/x64/Cyberpunk2077.exe")
+        self.assertEqual(running, {"program": "AppId=1091500", "name": "Cyberpunk 2077", "profile": 3})
+
+    def run_service(self, ticks, rules, state=None, profile=1, dry_run=False):
+        """apps_service over ticks (2 s each): [(names of the processes that run, what happens first:
+        None, an int (switched by hand), "unplugged" or "back")]. Returns the profiles it switched to, the log
+        (without times) and how often it opened the keyboard."""
+        import contextlib
+        import io
+        import tempfile
+        kb_state = {"profile": profile, "plugged": True, "opened": 0, "switched": []}
+        tick = [0]
+
+        class Keyboard:
+            def __init__(self, lock=True):
+                if not kb_state["plugged"]:
+                    raise z20.Z20Error("no EVGA Z20 connected")
+                kb_state["opened"] += 1
+
+            def profile_number(self):
+                return kb_state["profile"]
+
+            def set_profile(self, n):
+                kb_state["profile"] = n
+                kb_state["switched"].append(n)
+
+            def close(self):
+                pass
+
+        def before_tick():
+            names, happens = ticks[tick[0]]
+            if isinstance(happens, int):
+                kb_state["profile"] = happens
+            elif happens:
+                kb_state["plugged"] = happens == "back"
+            return [{"pid": 1000 + i, "start": i, "name": n, "argv": [f"/usr/bin/{n}"]} for i, n in enumerate(names)]
+
+        def sleep(_s):
+            tick[0] += 1
+            if tick[0] == len(ticks):
+                raise KeyboardInterrupt
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            saved = (z20.Keyboard, z20.processes, z20.time.sleep, z20.APPS_CONFIG, z20.APPS_STATE)
+            z20.Keyboard, z20.processes, z20.time.sleep = Keyboard, before_tick, sleep
+            z20.APPS_CONFIG, z20.APPS_STATE = os.path.join(d, "apps.ini"), os.path.join(d, "z20-apps.json")
+            try:
+                z20.write_apps(rules, z20.APPS_CONFIG)
+                if state:
+                    z20.save_json(z20.APPS_STATE, state)
+                with contextlib.redirect_stdout(out):
+                    z20.apps_service(dry_run)
+                self.assertFalse(os.path.exists(z20.APPS_STATE))  # gone with the service
+            finally:
+                z20.Keyboard, z20.processes, z20.time.sleep, z20.APPS_CONFIG, z20.APPS_STATE = saved
+        log = [line[10:] for line in out.getvalue().splitlines()][1:]  # without times and the rules
+        return kb_state["switched"], log, kb_state["opened"]
+
+    def test_switches_while_the_program_runs_and_back(self):
+        nothing, game = ([], None), (["bash", "Cyberpunk2077.exe"], None)
+        switched, log, opened = self.run_service([nothing, game, game, game, nothing, game, ([], 5), ([], None),
+                                                  (["Cyberpunk2077.exe"], 2), nothing],
+                                                 [("Cyberpunk2077.exe", 3)])
+        # back to 1; switched by hand to 5 meanwhile: stays; on 2 when it starts: back to 2
+        self.assertEqual(switched, [3, 1, 3, 3, 2])
+        self.assertEqual(opened, 6)  # only to switch
+        self.assertEqual(log, ["Cyberpunk2077.exe runs: profile 3, back to 1 when it ends",
+                               "Cyberpunk2077.exe ended: back to profile 1",
+                               "Cyberpunk2077.exe runs: profile 3, back to 1 when it ends",
+                               "Cyberpunk2077.exe ended: profile 5 stays, switched since",
+                               "Cyberpunk2077.exe runs: profile 3, back to 2 when it ends",
+                               "Cyberpunk2077.exe ended: back to profile 2"])
+
+    def test_the_first_rule_counts_and_unplugged_it_waits(self):
+        rules = [("witcher3.exe", 4), ("Cyberpunk2077.exe", 3)]
+        switched, log, _ = self.run_service([(["Cyberpunk2077.exe"], None), (["Cyberpunk2077.exe", "witcher3.exe"], None),
+                                             (["Cyberpunk2077.exe"], None), ([], "unplugged"), ([], None), ([], "back"),
+                                             (["witcher3.exe"], 3), ([], None)], rules, profile=3)
+        self.assertEqual(switched, [4, 3, 4, 3])
+        self.assertEqual(log, ["Cyberpunk2077.exe runs: profile 3 (on it already)",
+                               "witcher3.exe runs: profile 4, back to 3 when it ends",
+                               "Cyberpunk2077.exe runs: profile 3",
+                               "waiting for the keyboard: no EVGA Z20 connected",
+                               "keyboard back", "Cyberpunk2077.exe ended: profile 3 stays",
+                               "witcher3.exe runs: profile 4, back to 3 when it ends",
+                               "witcher3.exe ended: back to profile 3"])
+
+    def test_goes_on_from_a_killed_one_and_back_when_stopped(self):
+        state = {"pid": 0, "active": {"program": "AppId=1091500", "name": "Cyberpunk 2077", "profile": 3, "before": 1}}
+        reaper = (["SteamLaunch", "AppId=1091500"], None)
+        switched, log, opened = self.run_service([reaper, reaper], [("AppId=1091500", 3)], state=state, profile=3)
+        self.assertEqual((switched, opened), ([1], 1))  # nothing while it runs; stopped: back
+        self.assertEqual(log, ["stopped while Cyberpunk 2077 runs: back to profile 1"])
+
+    def test_dry_run_switches_nothing(self):
+        game = (["blender"], None)
+        switched, log, _ = self.run_service([game, ([], None)], [("blender", 4)], dry_run=True)
+        self.assertEqual(switched, [])
+        self.assertEqual(log, ["blender runs: profile 4, back to 1 when it ends (dry run: not switched)",
+                               "blender ended: back to profile 1 (dry run: not switched)"])
+
+
 class Commands(unittest.TestCase):
     """main() with a stand-in keyboard: what the commands print."""
 
@@ -1069,6 +1278,32 @@ class Commands(unittest.TestCase):
         self.assertEqual([p["profile"] for p in listed], list(range(1, 10)))
         self.assertEqual((listed[0]["name"], listed[1]["name"], listed[1]["active"]), ("Work", "DEFAULT 2", True))
         self.assertIn("* 2  DEFAULT 2", self.run_z20("profile"))
+
+    def test_apps(self):
+        import contextlib
+        import io
+        import json
+        import tempfile
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            old = z20.APPS_CONFIG, z20.APPS_STATE, z20.systemctl, z20.time.sleep
+            z20.APPS_CONFIG, z20.APPS_STATE = os.path.join(d, "apps.ini"), os.path.join(d, "z20-apps.json")
+            z20.systemctl = lambda *args, check=False: calls.append(args) or ""
+            z20.time.sleep = lambda s: None
+            try:
+                s = json.loads(self.run_z20("apps", "--json", "--", "set", "AppId=1091500", "3", "-x-", "2"))
+                self.assertEqual((s["rules"], s["service"], s["active"]),
+                                 ([{"program": "AppId=1091500", "profile": 3}, {"program": "-x-", "profile": 2}], False, None))
+                self.assertIn("\n  AppId=1091500  profile 3\n  -x-            profile 2\n", self.run_z20("apps"))
+                self.run_z20("apps", "--json", "on")
+                self.run_z20("apps", "--json", "off")
+                for bad in (["add", "x"], ["add", "x", "10"], ["set", "x"], ["set", "x", "1", "y"], ["on", "now"],
+                            ["remove"], ["start"]):
+                    with self.assertRaises(SystemExit, msg=bad), contextlib.redirect_stderr(io.StringIO()):
+                        self.run_z20("apps", *bad)
+            finally:
+                z20.APPS_CONFIG, z20.APPS_STATE, z20.systemctl, z20.time.sleep = old
+        self.assertEqual(calls, [("enable", "--now", "z20-apps.service"), ("disable", "--now", "z20-apps.service")])
 
 
 if __name__ == "__main__":
