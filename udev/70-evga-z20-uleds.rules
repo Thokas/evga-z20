@@ -1,0 +1,6 @@
+# Optional, for z20 backlight (install.sh asks): the logged-in user may give the Z20 a keyboard light
+# of its own, an LED through the kernel's uleds (loaded at boot: modules-load.d/evga-z20.conf), which
+# UPower then offers. Without this rule z20 backlight works all the same, without the LED.
+# It lets any program in the desktop session add LEDs; it can't change other LEDs.
+# 70-, as 70-evga-z20.rules: uaccess has to be tagged before 73-seat-late.rules.
+KERNEL=="uleds", SUBSYSTEM=="misc", TAG+="uaccess"

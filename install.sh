@@ -1,5 +1,6 @@
 #!/bin/sh
 # Install z20 to ~/.local/bin and its services (presence, animate, backlight, apps) to the systemd user units.
+# Usage: ./install.sh [--uleds]  (--uleds: z20 backlight as an LED too, see below)
 # Re-run after updating.
 set -eu
 cd "$(dirname "$0")"
@@ -23,19 +24,71 @@ if command -v systemctl >/dev/null 2>&1; then
         z20-apps.service || true
 fi
 
-# z20 needs the keyboard's configuration interface (one hidraw node), and z20 backlight /dev/uleds
-# for a keyboard light of its own; that takes root once.
-if ! cmp -s udev/70-evga-z20.rules /etc/udev/rules.d/70-evga-z20.rules ||
-        ! cmp -s modules-load.d/evga-z20.conf /etc/modules-load.d/evga-z20.conf; then
-    cat <<MSG
-!! Install the udev rule and the uleds module's entry once (as root), then unplug and replug the
-!! keyboard or run the trigger:
-!!   sudo install -m644 $PWD/udev/70-evga-z20.rules /etc/udev/rules.d/
-!!   sudo install -m644 $PWD/modules-load.d/evga-z20.conf /etc/modules-load.d/
-!!   sudo udevadm control --reload && sudo modprobe uleds
-!!   sudo udevadm trigger --subsystem-match=hidraw --subsystem-match=misc --action=change
+# Root, once: z20 needs the keyboard's configuration interface (one hidraw node, udev/70-evga-z20.rules).
+# Optional: z20 backlight's keyboard light of its own, an LED through /dev/uleds that UPower offers
+# (the uleds module at boot, modules-load.d/evga-z20.conf, and udev/70-evga-z20-uleds.rules). Asked
+# at a terminal when the rule is new or changed, and kept once chosen; --uleds adds it without asking.
+# The commands are shown, then run with sudo if you say so; without a terminal they are only shown.
+ETC=${Z20_ETC:-/etc}  # tests/test_install.py: a scratch /etc
+RULE=udev/70-evga-z20.rules
+ULEDS="modules-load.d/evga-z20.conf udev/70-evga-z20-uleds.rules"
+target_dir() {
+    case $1 in udev/*) echo "$ETC/udev/rules.d" ;; *) echo "$ETC/$(dirname "$1")" ;; esac
+}
+current() {
+    cmp -s "$1" "$(target_dir "$1")/$(basename "$1")"
+}
+ask() {  # ask QUESTION DEFAULT: true for yes; an empty answer (or none) is DEFAULT, y or n
+    printf '%s ' "$1"
+    read -r answer || answer=
+    case ${answer:-$2} in [Yy]*) return 0 ;; *) return 1 ;; esac
+}
 
-MSG
+uleds=
+[ -e "$ETC/modules-load.d/evga-z20.conf" ] && uleds=1  # chosen before
+[ "${1:-}" = --uleds ] && uleds=1
+need=
+current "$RULE" || need=$RULE
+if [ -z "$uleds" ] && [ -n "$need" ] && [ -t 0 ]; then
+    echo
+    ask "Optional: should z20 backlight also be a keyboard light that UPower offers, an LED through the
+kernel's uleds module? It lets any program in your desktop session add LEDs (not change others). [y/N]" n &&
+        uleds=1
+fi
+need_uleds=
+if [ -n "$uleds" ]; then
+    for f in $ULEDS; do
+        current "$f" || need_uleds=1
+    done
+fi
+[ -n "$need_uleds" ] && need="$need $ULEDS"
+
+if [ -n "$need" ]; then
+    run=
+    step() {
+        if [ -n "$run" ]; then "$@"; else echo "!!   $*"; fi
+    }
+    steps() {
+        for f in $need; do
+            step sudo install -m644 "$PWD/$f" "$(target_dir "$f")/"
+        done
+        step sudo udevadm control --reload
+        if [ -n "$need_uleds" ]; then
+            step sudo modprobe uleds
+            step sudo udevadm trigger --subsystem-match=hidraw --subsystem-match=misc --action=change
+        else
+            step sudo udevadm trigger --subsystem-match=hidraw --action=change
+        fi
+    }
+    echo
+    echo "!! As root, once (or unplug and replug the keyboard instead of the trigger):"
+    steps
+    if [ -t 0 ] && ask "Run these now with sudo? [Y/n]" y; then
+        run=1
+        steps
+        echo "Done: the keyboard's configuration interface is yours while you are logged in."
+    fi
+    echo
 fi
 
 cat <<'MSG'

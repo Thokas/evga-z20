@@ -1,5 +1,6 @@
-# The tests, on every push and pull request. "unit": z20 against a stand-in keyboard, and the settings
-# app's JavaScript in node (tests/js); the app's own tests skip there, without PyQt6. "app": the
+# The tests, on every push and pull request. "unit": z20 against a stand-in keyboard, install.sh and
+# uninstall.sh in a home of their own (tests/test_install.py), and the settings app's JavaScript in
+# node (tests/js); the app's own tests skip there, without PyQt6. "app": the
 # settings app offscreen with PyQt6 and KDE's QML modules as Ubuntu has them, driven scenario by
 # scenario against a fake z20 (tests/test_app.py, tests/app); Z20_APP_TESTS=required makes a missing
 # module an error rather than a skip. Nothing here needs a keyboard.

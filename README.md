@@ -266,8 +266,8 @@ the keyboard's Fn keys, are dimmed as well. Stopped, the service leaves the
 lighting as it is set. The keyboard's own brightness (Fn + Up / Down) comes
 on top.
 
-With the `uleds` module and the udev rule (see Install), the level is also
-an LED of its own, `evga_z20::kbd_backlight`, which UPower offers as a
+With the optional `uleds` module and its udev rule (see Install), the
+level is also an LED of its own, `evga_z20::kbd_backlight`, which UPower offers as a
 keyboard light next to a laptop's. Whatever sets UPower's keyboard lights
 can set it:
 
@@ -467,19 +467,33 @@ copies it from here.
 
 ```
 git clone https://github.com/Thokas/evga-z20.git && cd evga-z20
-./install.sh                     # z20 and z20-settings to ~/.local/bin
-# once, as root: let the logged-in user reach the keyboard's configuration interface
+./install.sh                     # z20 and z20-settings to ~/.local/bin, then the udev rule
+z20 backup                       # keep a copy of how the keyboard is set up now
+```
+
+`install.sh` needs no root itself. At the end it shows the commands that
+need root once and asks whether to run them with `sudo`: installing the
+udev rule, which lets the logged-in user reach the keyboard's configuration
+interface. Before that it asks about one optional part: the `uleds` module
+(now and at boot) with a rule of its own, so that `z20 backlight` is also
+a keyboard light UPower offers (see [Keyboard light](#keyboard-light)).
+Without a terminal it only shows the commands. Once chosen, `uleds` stays
+chosen on later runs; `./install.sh --uleds` adds it later. By hand:
+
+```
 sudo install -m644 udev/70-evga-z20.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw --action=change
-# optional, for z20 backlight's LED: the uleds module, now and at boot
+# optional, for z20 backlight's LED: the uleds module, now and at boot, and its rule
 sudo install -m644 modules-load.d/evga-z20.conf /etc/modules-load.d/ && sudo modprobe uleds
-z20 backup                       # keep a copy of how the keyboard is set up now
+sudo install -m644 udev/70-evga-z20-uleds.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=misc --action=change
 ```
 
 Needs Python 3.8 or newer and a desktop session with systemd-logind (the rule
 uses `uaccess`). The rule opens only USB interface 1, which carries the
 configuration reports; the two interfaces that carry your keystrokes stay
-root-only. It also opens `/dev/uleds`, for the keyboard light's LED.
+root-only. The optional `uleds` rule opens `/dev/uleds`, for the keyboard
+light's LED.
 
 ## Safety
 
@@ -507,9 +521,9 @@ macros stay in the keyboard, also on other computers, so check with
 `z20 status` if something types on its own. Chrome and other Chromium
 browsers can reach the interface through WebHID, but only after you pick the
 keyboard in the browser's device chooser: don't allow a website "EVGA Z20".
-Without the rule, `z20` works only as root. Through `/dev/uleds` such a
-program can also add LEDs of its own (which can confuse UPower), but not
-change the ones there are.
+Without the rule, `z20` works only as root. With the optional `uleds` rule,
+such a program can also add LEDs of its own through `/dev/uleds` (which
+can confuse UPower), but not change the ones there are.
 
 ## How it works
 
@@ -532,13 +546,15 @@ python3 -I -m unittest discover -s tests     # z20 (a stand-in keyboard), and th
 node --test tests/js/*.test.mjs              # the app's JavaScript: presets, preview, keyboard
 ```
 
-`tests/test_app.py` runs the settings app offscreen, a scenario at a time,
-in a home of its own against a fake `z20` (`tests/app/`): every page, a
-second start handing its page to the open one, the first start putting the
-keyboard's lighting first, Apply and a rename, keys' own colors stored and
-shown live, the color picker; any warning from its QML fails. It needs
-PyQt6 and the QML modules above, else it is skipped. Forgejo runs both on
-every push (`.forgejo/workflows/test.yml`).
+`tests/test_install.py` runs `install.sh` and `uninstall.sh` in a home of
+their own, against a fake `systemctl`. `tests/test_app.py` runs the
+settings app offscreen, a scenario at a time, in a home of its own against
+a fake `z20` (`tests/app/`): every page, a second start handing its page
+to the open one, the first start putting the keyboard's lighting first,
+Apply and a rename, keys' own colors stored and shown live, the color
+picker; any warning from its QML fails. It needs PyQt6 and the QML modules
+above, else it is skipped. Forgejo runs both on every push
+(`.forgejo/workflows/test.yml`).
 
 ## Not done yet
 
@@ -552,12 +568,14 @@ every push (`.forgejo/workflows/test.yml`).
 ## Uninstall
 
 ```
-systemctl --user disable --now z20-presence.service z20-animate.service z20-backlight.service z20-apps.service
-rm ~/.local/bin/z20 ~/.local/bin/z20-settings ~/.config/systemd/user/z20-{presence,animate,backlight,apps}.service
-rm -r ~/.local/share/z20 ~/.local/share/applications/de.thokas.z20-settings.desktop
-sudo rm /etc/udev/rules.d/70-evga-z20.rules /etc/modules-load.d/evga-z20.conf
-rm -r ~/.local/state/z20         # the backups too
+./uninstall.sh                   # z20, z20-settings and the user services (stopped first)
+# as root: the udev rules and the uleds module's entry
+sudo rm -f /etc/udev/rules.d/70-evga-z20{,-uleds}.rules /etc/modules-load.d/evga-z20.conf
+rm -r ~/.config/z20 ~/.local/state/z20   # the settings and the backups too
 ```
+
+`uninstall.sh` keeps the settings and the backups. Remove the Plasma widget
+first, with its own `uninstall.sh`, if you have it.
 
 ## Note
 

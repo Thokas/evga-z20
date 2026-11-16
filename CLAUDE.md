@@ -12,7 +12,9 @@
   (in the same discover run; skipped without PyQt6 and Kirigami). New behavior
   of the app gets a scenario there. CI: `.forgejo/workflows/test.yml`.
 - `./install.sh` restarts the user's running z20 services (presence,
-  backlight, animate, apps): run it to ship a change, not to test one.
+  backlight, animate, apps), and `./uninstall.sh` stops and removes them:
+  run them for real only to ship a change. `tests/test_install.py` runs
+  both with a scratch HOME and a fake `systemctl` first on PATH.
 
 ## The settings app offscreen (`app/`)
 
