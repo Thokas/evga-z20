@@ -127,6 +127,18 @@ Item {
                 color: 0.299 * key.lit.r + 0.587 * key.lit.g + 0.114 * key.lit.b > 0.55 ? "#cc000000" : "#ccffffff"
             }
 
+            // Selected: a white ring around it, in the gap to the next keys, which shows on any key's color
+            // (the case is always dark).
+            Rectangle {
+                visible: key.chosen
+                anchors.fill: parent
+                anchors.margins: -Math.max(2, key.gap)
+                radius: key.radius + Math.max(2, key.gap)
+                color: "transparent"
+                border.width: Math.max(1.5, view.unit * 0.07)
+                border.color: "#ffffff"
+            }
+
             // A key with a color of its own.
             Rectangle {
                 visible: key.own !== "" && key.isKey
