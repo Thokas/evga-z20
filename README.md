@@ -456,7 +456,7 @@ stored, `saved_animation`, and the keys' stored colors, `key_colors`).
 
 It is QML with KDE's Kirigami, run by a small Python launcher; it needs
 PyQt6 and Kirigami as the distribution has them (Debian, Ubuntu:
-`python3-pyqt6`, `qml6-module-org-kde-kirigami`,
+`python3-pyqt6`, `python3-pyqt6.qtqml`, `qml6-module-org-kde-kirigami`,
 `qml6-module-org-kde-kcmutils`, `qml6-module-org-kde-plasma-plasma5support`;
 a KDE Plasma desktop has all but PyQt6). The QML is in `app/qml`;
 `app/qml/lib/Z20Data.qml` talks to `z20` for the app and for the
@@ -523,7 +523,22 @@ settings, single keys), so they work at once without a reload: a reload
 restarts the lighting effect, and one set to start on a key press would
 stay dark until then. The details are in [PROTOCOL.md](PROTOCOL.md).
 
-Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
+## Tests
+
+All offline, no keyboard needed:
+
+```
+python3 -I -m unittest discover -s tests     # z20 (a stand-in keyboard), and the app as below
+node --test tests/js/*.test.mjs              # the app's JavaScript: presets, preview, keyboard
+```
+
+`tests/test_app.py` runs the settings app offscreen, a scenario at a time,
+in a home of its own against a fake `z20` (`tests/app/`): every page, a
+second start handing its page to the open one, the first start putting the
+keyboard's lighting first, Apply and a rename, keys' own colors stored and
+shown live, the color picker; any warning from its QML fails. It needs
+PyQt6 and the QML modules above, else it is skipped. Forgejo runs both on
+every push (`.forgejo/workflows/test.yml`).
 
 ## Not done yet
 

@@ -6,6 +6,11 @@
   `Keyboard`, patched time and paths, temp dirs. Never let a test switch the
   real keyboard's profile or lighting: it is in use. It may or may not be
   plugged in; live checks can fail with "no EVGA Z20 connected".
+- The app's JavaScript: `node --test tests/js/*.test.mjs` (`tests/js/load.mjs`
+  loads `app/qml/lib` without its QML pragmas).
+- The app: `tests/test_app.py` runs `tests/app/drive.py` a scenario at a time
+  (in the same discover run; skipped without PyQt6 and Kirigami). New behavior
+  of the app gets a scenario there. CI: `.forgejo/workflows/test.yml`.
 - `./install.sh` restarts the user's running z20 services (presence,
   backlight, animate, apps): run it to ship a change, not to test one.
 

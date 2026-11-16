@@ -1,0 +1,58 @@
+# The tests, on every push and pull request. "unit": z20 against a stand-in keyboard, and the settings
+# app's JavaScript in node (tests/js); the app's own tests skip there, without PyQt6. "app": the
+# settings app offscreen with PyQt6 and KDE's QML modules as Ubuntu has them, driven scenario by
+# scenario against a fake z20 (tests/test_app.py, tests/app); Z20_APP_TESTS=required makes a missing
+# module an error rather than a skip. Nothing here needs a keyboard.
+name: tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: docker
+    container:
+      image: ubuntu:26.04
+    steps:
+      - name: checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            git ca-certificates python3 nodejs >/dev/null
+          # The token goes in a header for the clone only (GIT_CONFIG_*), not into src/.git/config.
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $auth" \
+            git clone -q "${{ github.server_url }}/${{ github.repository }}.git" src
+          git -C src checkout -q "${{ github.sha }}"
+      - name: z20
+        run: cd src && python3 -I -m unittest discover -s tests -v
+      - name: the app's JavaScript
+        if: ${{ !cancelled() }}
+        run: cd src && node --test tests/js/*.test.mjs
+
+  app:
+    runs-on: docker
+    container:
+      image: ubuntu:26.04
+    steps:
+      - name: checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            git ca-certificates python3 fonts-dejavu-core \
+            python3-pyqt6 python3-pyqt6.qtqml python3-pyqt6.qtquick \
+            qml6-module-org-kde-kirigami qml6-module-org-kde-kcmutils qml6-module-org-kde-plasma-plasma5support \
+            qml6-module-org-kde-desktop qml6-module-qtquick-dialogs qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window \
+            qml6-module-qtqml-workerscript >/dev/null
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $auth" \
+            git clone -q "${{ github.server_url }}/${{ github.repository }}.git" src
+          git -C src checkout -q "${{ github.sha }}"
+      - name: the settings app, offscreen
+        env:
+          Z20_APP_TESTS: required
+        run: cd src && python3 -I -m unittest discover -s tests -p test_app.py -v
