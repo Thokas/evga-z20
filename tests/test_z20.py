@@ -630,6 +630,30 @@ class Reports(unittest.TestCase):
 
 
 class Lighting(unittest.TestCase):
+    def test_reported_whole_for_widgets(self):
+        # every color an animated effect keeps, and its direction: what a widget compares its presets with
+        colors = [z20.parse_color(c) for c in ("ff0000", "00ff00", "0000ff")]
+        q = z20.set_lighting(profile(), "wave", z20.fill_colors("wave", colors), 80, 2500, "left")
+        state = z20.lighting(q)
+        self.assertEqual(state["colors"], ["#ff0000", "#00ff00", "#0000ff"] * 2 + ["#ff0000", "#00ff00"])
+        self.assertEqual((state["direction"], state["cycle_ms"], state["brightness"]), ("left", 2500, 80))
+        self.assertEqual(z20.lighting_text(state), "wave 2500 ms")  # 8 colors would be too long
+        spiral = z20.lighting(z20.set_lighting(profile(), "spiral", [], None, None, "ccw"))
+        self.assertEqual(spiral["direction"], "ccw")
+
+    def test_stored_key_colors(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            old = z20.COLORS
+            z20.COLORS = os.path.join(d, "colors.bin")
+            try:
+                self.assertEqual(z20.stored_key_colors(), {})
+                with open(z20.COLORS, "wb") as f:
+                    f.write(z20.color_frame(None, [("w,a", "ff3000"), ("esc", "000000"), ("q", "none")], None))
+                self.assertEqual(z20.stored_key_colors(), {"W": "ff3000", "A": "ff3000", "Esc": "000000"})
+            finally:
+                z20.COLORS = old
+
     def test_static_changes_only_the_effect_and_its_color(self):
         p = profile()
         q = z20.set_lighting(p, "static", [b"\x12\x34\x56"], 50, None)

@@ -9,7 +9,8 @@
  * the drawing: try it on the keyboard (only for now: what is stored comes
  * back with "Back to stored"), or have every change shown there as it's
  * made, or apply it (stored, as the widget's popup applies one). The one
- * applied, here or in the popup, is marked, and the page opens on it.
+ * that is the lighting the keyboard has stored, however it got there, is
+ * marked, and the page opens on it.
  * Saved a moment after each change (~/.config/z20/presets.json).
  */
 
@@ -29,6 +30,8 @@ Kirigami.Page {
     property int current: 0
     readonly property var preset: presets[current] || null
     readonly property int slots: preset ? Presets.COLOR_SLOTS[preset.effect] || 0 : 0
+    // The one that is the lighting the keyboard has stored, whoever applied it (-1: none).
+    readonly property int appliedIndex: z20.appliedIndex(presets)
     // The keys' own colors, most keys first: [{color, names}].
     readonly property var keyColors: {
         const keys = preset && preset.keys || {};
@@ -43,9 +46,11 @@ Kirigami.Page {
         z20.refresh();  // what shows, to find the preset applied
     }
 
-    // The presets once read (the defaults while there are none stored); then the one applied is picked, once
-    // the keyboard's state is read too.
+    // The presets once read (the defaults while there are none stored), anew when they are first stored (the
+    // first start puts the keyboard's lighting first) unless changed here already; then the one applied is
+    // picked, once the keyboard's state is read too.
     property bool chosen: false
+    property bool edited: false
     Connections {
         target: z20
         function onDetailsReadChanged() {
@@ -53,6 +58,13 @@ Kirigami.Page {
                 page.presets = Presets.parse(z20.presetsText);
             }
             page.chooseApplied();
+        }
+        function onPresetsTextChanged() {
+            if (!page.edited && z20.presetsText) {
+                page.presets = Presets.parse(z20.presetsText);
+                page.chosen = false;
+                page.chooseApplied();
+            }
         }
         function onStatusChanged() {
             page.chooseApplied();
@@ -62,9 +74,8 @@ Kirigami.Page {
     function chooseApplied() {
         if (!chosen && presets.length && z20.status) {
             chosen = true;
-            const applied = presets.findIndex(p => z20.isApplied(p));
-            if (applied >= 0) {
-                current = applied;
+            if (appliedIndex >= 0) {
+                current = appliedIndex;
             }
         }
     }
@@ -72,6 +83,7 @@ Kirigami.Page {
     // Every change goes through here: a new list, so the bindings see it, stored a moment later.
     function update(list) {
         presets = list;
+        edited = true;
         saveLater.restart();
         if (showLive.checked) {
             liveLater.restart();
@@ -224,7 +236,7 @@ Kirigami.Page {
                             RowLayout {
                                 // The one applied (from the popup or here).
                                 Kirigami.Icon {
-                                    visible: z20.isApplied(modelData)
+                                    visible: index === page.appliedIndex
                                     source: "checkmark"
                                     color: item.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
                                     implicitWidth: Kirigami.Units.iconSizes.small
@@ -233,7 +245,7 @@ Kirigami.Page {
                                 QQC2.Label {
                                     text: modelData.name
                                     color: item.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
-                                    font.bold: z20.isApplied(modelData)
+                                    font.bold: index === page.appliedIndex
                                     elide: Text.ElideRight
                                     Layout.fillWidth: true
                                 }
@@ -360,7 +372,7 @@ Kirigami.Page {
                         }
                         QQC2.Label {
                             id: applied
-                            visible: z20.isApplied(page.preset)
+                            visible: page.current === page.appliedIndex
                             text: i18n("Applied")
                             color: Kirigami.Theme.positiveTextColor
                             Layout.fillWidth: true

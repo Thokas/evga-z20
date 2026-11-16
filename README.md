@@ -446,7 +446,13 @@ rollover, the keys Game Mode blocks). It is in the application menu as
 "EVGA Z20"; `z20-settings macros` opens it on a page, and run again while
 it is open, the open one shows that page (as the Plasma widget's pencils
 do). It changes the keyboard through `z20`, at once; the presets are kept
-in `~/.config/z20/presets.json`, which the widget's popup offers too.
+in `~/.config/z20/presets.json`, which the widget's popup offers too. On
+the first start the lighting the keyboard has stored is the first preset
+(a built-in one where it is that, else one named after the profile), and
+whichever preset is what the keyboard has stored, however it got there, is
+marked as applied, in the app and in the popup (`z20 status --json` has
+the stored lighting with all its colors and direction, the software effect
+stored, `saved_animation`, and the keys' stored colors, `key_colors`).
 
 It is QML with KDE's Kirigami, run by a small Python launcher; it needs
 PyQt6 and Kirigami as the distribution has them (Debian, Ubuntu:

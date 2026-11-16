@@ -107,6 +107,86 @@ function awayLight(preset) {
     return lighting.filter(function (a) { return a !== "--live"; }).join(" ");
 }
 
+// The colors as the keyboard keeps them after z20 light: breathing with one goes out to dark, the animated
+// effects repeat theirs to fill every slot (z20's fill_colors).
+function filled(effect, colors) {
+    var count = COLOR_SLOTS[effect] || 0;
+    if (effect === "breathing" && colors.length === 1) {
+        return colors.concat(["000000"]);
+    }
+    if (count > 2 && colors.length > 0 && colors.length < count) {
+        var out = [];
+        while (out.length < count) {
+            out = out.concat(colors);
+        }
+        return out.slice(0, count);
+    }
+    return colors;
+}
+
+function hex(color) {
+    return String(color).replace(/^#/, "").toLowerCase();
+}
+
+// Whether the preset is the lighting the keyboard has stored, what a reload brings back: stored, a status of
+// z20 from 2026-11-16 on (z20 status --json: lighting, saved_animation, key_colors). Its effect, colors, speed,
+// brightness, direction and keys' colors, where the preset has them (a preset without colors keeps the
+// profile's, so any count).
+function matches(preset, stored) {
+    if (!preset || !stored || !stored.lighting) {
+        return false;
+    }
+    var same = function (a, b) {
+        return a.length === b.length && a.every(function (c, i) { return hex(c) === hex(b[i]); });
+    };
+    var own = preset.keys || {}, keys = stored.key_colors || {};
+    if (Object.keys(own).length !== Object.keys(keys).length
+            || Object.keys(own).some(function (k) { return hex(own[k]) !== hex(keys[k] || ""); })) {
+        return false;
+    }
+    var colors = (preset.colors || []).slice(0, COLOR_SLOTS[preset.effect] || 0);
+    var anim = stored.saved_animation;
+    if (isSoftware(preset.effect)) {
+        return !!anim && anim.effect === preset.effect && (!colors.length || same(colors, anim.colors))
+            && (preset.brightness === undefined || Math.abs((anim.brightness === null ? 100 : anim.brightness)
+                                                            - preset.brightness) <= 1)
+            && (!preset.cycle || anim.cycle_ms === Math.round(preset.cycle));
+    }
+    var l = stored.lighting;
+    return !anim && l.effect === preset.effect  // a software effect stored would cover it
+        && (!colors.length || !l.colors || same(filled(preset.effect, colors), l.colors))
+        && (preset.effect === "off" || preset.brightness === undefined || l.brightness === undefined
+            || Math.abs(l.brightness - preset.brightness) <= 1)  // percent → 0-255 → percent may move by one
+        && (HAS_CYCLE.indexOf(preset.effect) < 0 || !preset.cycle || l.cycle_ms === undefined
+            || l.cycle_ms === Math.round(preset.cycle))
+        && (!DIRECTIONS[preset.effect] || !preset.direction || !l.direction || l.direction === preset.direction);
+}
+
+// The lighting the keyboard has stored (as for matches()) as a preset named name: the software effect where
+// one is stored, else the profile's own effect with all it has; the keys' own colors. null for an effect a
+// preset can't have.
+function fromKeyboard(stored, name) {
+    var anim = stored.saved_animation, l = stored.lighting || {};
+    var p = anim ? { name: name, effect: anim.effect, colors: (anim.colors || []).map(hex),
+                     brightness: anim.brightness === null ? 100 : anim.brightness, cycle: anim.cycle_ms }
+                 : { name: name, effect: l.effect, colors: (l.colors || []).map(hex), brightness: l.brightness,
+                     cycle: l.cycle_ms, direction: l.direction };
+    if (EFFECTS.indexOf(p.effect) < 0) {
+        return null;
+    }
+    Object.keys(p).forEach(function (k) {
+        if (p[k] === undefined || p[k] === null) {
+            delete p[k];
+        }
+    });
+    var keys = stored.key_colors || {};
+    if (Object.keys(keys).length) {
+        p.keys = {};
+        Object.keys(keys).forEach(function (k) { p.keys[k] = hex(keys[k]); });
+    }
+    return p;
+}
+
 // The stored list, or the defaults when there is none yet.
 function parse(text) {
     try {

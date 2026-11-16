@@ -799,12 +799,16 @@ def color_hex(argb):
 
 
 def lighting(p):
+    """The profile's lighting: its effect, every color it has (7-8 for the animated ones), the
+    cycle, brightness and direction, as far as the effect has them."""
     effect = p[P_EFFECT]
     state = {"effect": EFFECT_NAMES.get(effect, f"effect {effect}")}
-    if effect in (1, 2, 16):  # one or two colors worth showing; the others have 7-8 each
+    if effect in EFFECT_COLORS:
         offset, count, size = EFFECT_COLORS[effect]
         start = offset + size - 4
         state["colors"] = [color_hex(p[start + i * size:start + i * size + 4]) for i in range(count)]
+    if effect in DIRECTIONS:
+        state["direction"] = {v: k for k, v in DIRECTIONS[effect].items()}.get(p[EFFECT_SUB[effect]])
     if effect in EFFECT_CYCLE:
         state["cycle_ms"] = p[EFFECT_CYCLE[effect]] | p[EFFECT_CYCLE[effect] + 1] << 8
     if effect == 6:
@@ -816,7 +820,8 @@ def lighting(p):
 
 
 def lighting_text(state):
-    return " ".join([state["effect"], *state.get("colors", []),
+    colors = state.get("colors", [])
+    return " ".join([state["effect"], *(colors if len(colors) <= 2 else []),  # 7-8 would be too long
                      *([f"{state['cycle_ms']} ms"] if "cycle_ms" in state else [])])
 
 
@@ -1730,6 +1735,7 @@ ANIMATION_STATE = os.path.join(STATE, "animation.json")  # what runs now, and it
 ANIMATION_CONFIG = os.path.expanduser("~/.config/z20/animation.ini")  # --save: run by the service
 ANIMATION_LIVE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or STATE, "z20-animation.ini")  # --live
 ANIMATION_SERVICE = "z20-animate.service"
+ANIMATION_ENABLED = os.path.expanduser("~/.config/systemd/user/graphical-session.target.wants/" + ANIMATION_SERVICE)
 
 
 def led_shapes(iso=True):
@@ -2078,21 +2084,39 @@ def write_animation(path, effect, colors, cycle, brightness):
 def saved_animation():
     """(effect, colors, cycle, brightness, how) from the --live file, else the --save one; or None."""
     for path, how in ((ANIMATION_LIVE, "live"), (ANIMATION_CONFIG, "saved")):
-        if not os.path.exists(path):
-            continue
-        parser = configparser.ConfigParser(interpolation=None)
-        try:
-            parser.read(path)
-            section = parser["animation"]
-            effect = section["effect"]
-            colors = [c.strip().lstrip("#") for c in section.get("colors", "").split(",") if c.strip()]
-            cycle = int(section["cycle"]) if section.get("cycle") else None
-            brightness = int(section["brightness"]) if section.get("brightness") else None
-        except (configparser.Error, KeyError, ValueError) as e:
-            raise Z20Error(f"{path}: {e}") from None
-        check_animation(effect, colors, cycle, brightness, path)
-        return effect, colors or ANIMATIONS[effect][0], cycle or ANIMATIONS[effect][2], brightness, how
+        if os.path.exists(path):
+            return read_animation(path, how)
     return None
+
+
+def stored_animation():
+    """The software effect that is stored, as for the lighting the profile has: the --save one while
+    the z20-animate service is enabled (its link, as systemctl --user enable makes it); else None.
+    For a status: {effect, colors, cycle_ms, brightness}."""
+    if not os.path.exists(ANIMATION_ENABLED) or not os.path.exists(ANIMATION_CONFIG):
+        return None
+    try:
+        effect, colors, cycle, brightness, _ = read_animation(ANIMATION_CONFIG, "saved")
+    except Z20Error:
+        return None
+    return {"effect": effect, "colors": colors, "cycle_ms": cycle, "brightness": brightness}
+
+
+def read_animation(path, how):
+    """(effect, colors, cycle, brightness, how) from an animation.ini (colors and cycle: the effect's
+    own where it has none)."""
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(path)
+        section = parser["animation"]
+        effect = section["effect"]
+        colors = [c.strip().lstrip("#") for c in section.get("colors", "").split(",") if c.strip()]
+        cycle = int(section["cycle"]) if section.get("cycle") else None
+        brightness = int(section["brightness"]) if section.get("brightness") else None
+    except (configparser.Error, KeyError, ValueError) as e:
+        raise Z20Error(f"{path}: {e}") from None
+    check_animation(effect, colors, cycle, brightness, path)
+    return effect, colors or ANIMATIONS[effect][0], cycle or ANIMATIONS[effect][2], brightness, how
 
 
 def check_animation(effect, colors, cycle, brightness, where="animate"):
@@ -2344,6 +2368,15 @@ class Dimmer:
         """Go on from the state a z20 backlight that was killed left: RAM may still be dimmed."""
         if state.get("effect") in RAM_BLOCKS:
             self.effect, self.base, self.shown = state["effect"], bytes.fromhex(state["block"]), bytes.fromhex(state["shown"])
+
+
+def stored_key_colors():
+    """The stored colors per key (z20 color without --live), {LED name: rrggbb}, dark ones 000000."""
+    if not os.path.exists(COLORS):
+        return {}
+    with open(COLORS, "rb") as f:
+        frame = f.read()
+    return {name: color[1:] for color, names in colors_shown(frame).items() for name in names}
 
 
 def colors_now():
@@ -2684,6 +2717,7 @@ def status(kb):
     return {"model": kb.model, "firmware": kb.firmware(), "profile": n, "profile_name": profile_name(p),
             "game_mode": kb.game_mode(), "game_mode_blocks": game_keys(p), "nkro": kb.nkro(),
             "report_rate": rate_hz(p), "lighting": lighting(p), "animation": animation_info(),
+            "saved_animation": stored_animation(), "key_colors": stored_key_colors(),
             "backlight": backlight_info(), "apps": apps_info(),
             "keys": keys, "changed_keys": changed, "macros": {str(m): name for m, name in names.items()}}
 

@@ -64,7 +64,8 @@ QtObject {
     // and whether the first read of all this came in.
     property string presetsText: ""
     property bool detailsRead: false
-    // The name of the preset applied last, from the widget or the app (~/.local/state/z20/preset).
+    // The name of the preset applied last, from the widget or the app (~/.local/state/z20/preset): which of
+    // presets alike is the one applied.
     property string appliedPreset: ""
     // z20 macros --json ({"N": {name, actions}}); null until refreshMacros() read them.
     property var macros: null
@@ -208,10 +209,44 @@ QtObject {
         appliedPreset = preset.name;
         _exec(_chain(Presets.commands(preset, false)) + " && " + _appliedCommand(preset.name));
     }
-    // Whether the preset is the one applied: by its name, while its effect still shows (not after a change
-    // with the keyboard's keys, z20 or the presence service's lighting while away).
-    function isApplied(preset) {
-        return !!preset && preset.name === appliedPreset && preset.effect === effectShown;
+    // The preset in list that is the lighting the keyboard has stored, whoever applied it (Presets.matches, with
+    // z20 from 2026-11-16 on); where several are, the one applied last by name. With an older z20 the one
+    // applied last, while its effect shows. -1: none, or the keyboard not read yet.
+    function appliedIndex(list) {
+        if (!status || !list) {
+            return -1;
+        }
+        if (status.key_colors === undefined) {
+            return list.findIndex(p => p.name === appliedPreset && p.effect === effectShown);
+        }
+        const found = list.map((p, i) => Presets.matches(p, status) ? i : -1).filter(i => i >= 0);
+        const named = found.filter(i => list[i].name === appliedPreset);
+        return named.length ? named[0] : found.length ? found[0] : -1;
+    }
+
+    // A first start, with no presets stored yet: the built-in ones, with the lighting the keyboard has stored
+    // first (the built-in one that is it, else one of its own, named after the profile). Once, by whoever
+    // reads first, the widget or the app; called later, so what stores some first goes first (the widget's
+    // presets from before).
+    property bool _seeded: false
+    function _seedPresets() {
+        if (_seeded || presetsText || !detailsRead || !status || status.key_colors === undefined) {
+            return;
+        }
+        _seeded = true;
+        const list = Presets.defaults();
+        const same = list.findIndex(p => Presets.matches(p, status));
+        if (same >= 0) {
+            list.unshift(list.splice(same, 1)[0]);
+        } else {
+            const named = profileName(status.profile);  // as from the factory ("DEFAULT 1"): "Profile 1"
+            const own = Presets.fromKeyboard(status, !named || /^DEFAULT \d$/i.test(named)
+                                                     ? i18n("Profile %1", status.profile) : named);
+            if (own) {
+                list.unshift(own);
+            }
+        }
+        savePresets(list);
     }
     // The applied preset was renamed: it stays the one applied.
     function renameApplied(from, to) {
@@ -447,6 +482,7 @@ QtObject {
         presenceSettings = _parse(lines[1]);
         presetsText = (lines[2] || "").trim();
         appliedPreset = (lines[3] || "").trim();
+        Qt.callLater(_seedPresets);
         detailsError = listed ? "" : ((data.stderr || "").trim().split("\n").pop().replace(/^z20: /, "")
                                       || i18n("No answer from z20"));
         detailsRead = true;
@@ -455,6 +491,7 @@ QtObject {
     // Game Mode as last read; null until the first read, so starting up says nothing.
     property var _lastGameMode: null
     onStatusChanged: {
+        Qt.callLater(_seedPresets);
         if (!status) {
             return;  // keyboard gone or z20 busy: compare with the last read once it's back
         }
