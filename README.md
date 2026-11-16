@@ -554,7 +554,8 @@ to the open one, the first start putting the keyboard's lighting first,
 Apply and a rename, keys' own colors stored and shown live, the color
 picker; any warning from its QML fails. It needs PyQt6 and the QML modules
 above, else it is skipped. Forgejo runs both on every push
-(`.forgejo/workflows/test.yml`).
+(`.forgejo/workflows/test.yml`), GitHub on every pull request
+(`.github/workflows/test.yml`).
 
 ## Not done yet
 
@@ -576,6 +577,11 @@ rm -r ~/.config/z20 ~/.local/state/z20   # the settings and the backups too
 
 `uninstall.sh` keeps the settings and the backups. Remove the Plasma widget
 first, with its own `uninstall.sh`, if you have it.
+
+## Contributing
+
+Issues and pull requests are welcome on GitHub. GitHub Actions runs the
+tests on every pull request.
 
 ## Note
 

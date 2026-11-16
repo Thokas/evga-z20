@@ -1,0 +1,51 @@
+# The tests on GitHub, on pushes and pull requests: the same as .forgejo/workflows/test.yml.
+# "unit": z20 against a stand-in keyboard, install.sh and uninstall.sh in a home of their own,
+# the settings app's JavaScript in node. "app": the settings app offscreen with PyQt6 and KDE's QML
+# modules as Ubuntu has them, against a fake z20; Z20_APP_TESTS=required makes a missing module an
+# error rather than a skip. Nothing here needs a keyboard.
+name: tests
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    steps:
+      - name: packages
+        run: |
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            git ca-certificates python3 nodejs >/dev/null
+      - uses: actions/checkout@v4
+      - name: z20
+        run: python3 -I -m unittest discover -s tests -v
+      - name: the app's JavaScript
+        if: ${{ !cancelled() }}
+        run: node --test tests/js/*.test.mjs
+
+  app:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    steps:
+      - name: packages
+        run: |
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            git ca-certificates python3 fonts-dejavu-core \
+            python3-pyqt6 python3-pyqt6.qtqml python3-pyqt6.qtquick \
+            qml6-module-org-kde-kirigami qml6-module-org-kde-kcmutils qml6-module-org-kde-plasma-plasma5support \
+            qml6-module-org-kde-desktop qml6-module-qtquick-dialogs qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window \
+            qml6-module-qtqml-workerscript >/dev/null
+      - uses: actions/checkout@v4
+      - name: the settings app, offscreen
+        env:
+          Z20_APP_TESTS: required
+        run: python3 -I -m unittest discover -s tests -p test_app.py -v

@@ -10,7 +10,8 @@
   loads `app/qml/lib` without its QML pragmas).
 - The app: `tests/test_app.py` runs `tests/app/drive.py` a scenario at a time
   (in the same discover run; skipped without PyQt6 and Kirigami). New behavior
-  of the app gets a scenario there. CI: `.forgejo/workflows/test.yml`.
+  of the app gets a scenario there. CI: `.forgejo/workflows/test.yml`,
+  and `.github/workflows/test.yml` on GitHub.
 - `./install.sh` restarts the user's running z20 services (presence,
   backlight, animate, apps), and `./uninstall.sh` stops and removes them:
   run them for real only to ship a change. `tests/test_install.py` runs
