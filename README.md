@@ -97,7 +97,9 @@ z20 light reload                      back to the stored lighting
 z20 light default | sensor default    back to the factory setting
 z20 color all 000000 w,a,s,d ff0000   colors per LED over the lighting (later calls add);
                                       also e1, LeftBar1-9, RightBar1-9, Logo1-4, keys, bars, logo
+z20 color all none w ff0000 --live    for now (none: the lighting shows); z20 color reload
 z20 color off                         back to the profile's lighting
+z20 leds --json                       every LED with its name, place and key size
 z20 animate fire                      a software effect, until Ctrl+C: aurora, fire, rain,
                                       ripple, scanner, gradient [COLOR ...] [--cycle MS]
                                       [--brightness P]
@@ -163,8 +165,11 @@ switching profiles or unplugging bring back what is stored. `z20 light`
 shows what is on and, after `--live`, what is stored. `z20 color` puts
 colors on single LEDs over whatever lighting runs, until `z20 color off`;
 it keeps the colors in `~/.local/state/z20/colors.bin`, so each call adds to
-the last one (`all 000000` starts from dark). The keyboard doesn't store
-them.
+the last one (`all 000000` starts from dark, `all none` from none). The
+keyboard doesn't store them. With `--live` they are only for now, kept apart
+until `z20 color reload` brings back the stored ones; `z20 animate` draws
+them over its frames. `z20 leds` lists every LED with its place and key size,
+for drawing the keyboard.
 
 Macro steps are written the way `z20 macros` prints them, separated by
 commas: `KEY down`, `KEY up`, `wait 20 ms`, `left button down`, `wheel up`,

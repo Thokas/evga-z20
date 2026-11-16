@@ -953,6 +953,84 @@ class Backlight(unittest.TestCase):
                                                              pd + b"profileChanged ('AC',)", pd + b"configurationReloaded ()")],
                          [True, False, None, None])
 
+class Colors(unittest.TestCase):
+    """z20 color: colors per LED over the lighting, stored or for now (--live), and z20 leds."""
+
+    def test_none_leaves_leds_to_the_lighting(self):
+        frame = z20.color_frame(None, [("all", "ff0000"), ("w,a,s,d", "none")], None)
+        w, q = z20.KEY_BY_NAME["w"], z20.KEY_BY_NAME["q"]
+        self.assertEqual(bytes(frame[w * 4:w * 4 + 4]), bytes(4))
+        self.assertEqual(bytes(frame[q * 4:q * 4 + 4]), b"\xff\xff\x00\x00")
+        self.assertNotIn("W", [n for names in z20.colors_shown(frame).values() for n in names])
+        dark = z20.color_frame(None, [("esc", "000000")], None)
+        self.assertEqual(z20.colors_shown(dark), {"#000000": ["Esc"]})  # dark is set, not left out
+
+    def test_over_colors_keeps_what_they_leave_out(self):
+        blue = z20.animation_frame({p: (0, 0, 255) for p in z20.LED_NAMES}, 0xFF)
+        keys = z20.color_frame(None, [("w", "ff0000"), ("e", "none")], None)
+        out = z20.over_colors(blue, keys)
+        w, e = z20.KEY_BY_NAME["w"], z20.KEY_BY_NAME["e"]
+        self.assertEqual(bytes(out[w * 4:w * 4 + 4]), b"\xff\xff\x00\x00")
+        self.assertEqual(bytes(out[e * 4:e * 4 + 4]), b"\xff\x00\x00\xff")
+
+    def test_live_until_reload(self):
+        import contextlib
+        import io
+        import tempfile
+        sent = []
+
+        class StandIn:
+            model = "Z20 Elite ISO"
+
+            def __init__(self, lock=True):
+                pass
+
+            def send(self, report):
+                sent.append("colors" if report[3] else "end")
+
+            def close(self):
+                pass
+
+        def run(*argv):
+            sent.clear()
+            sys.argv = ["z20", "color", *argv]
+            with contextlib.redirect_stdout(io.StringIO()):
+                z20.main()
+            frame = z20.colors_now()
+            return sent[:], frame and {c: n for c, n in z20.colors_shown(frame).items()}
+
+        with tempfile.TemporaryDirectory() as d:
+            old = (z20.Keyboard, sys.argv, z20.STATE, z20.COLORS, z20.COLORS_LIVE, z20.animation_state,
+                   z20.backlight_percent)
+            z20.Keyboard, z20.STATE = StandIn, d
+            z20.COLORS, z20.COLORS_LIVE = os.path.join(d, "colors.bin"), os.path.join(d, "live.bin")
+            z20.animation_state, z20.backlight_percent = lambda: None, lambda: 100
+            try:
+                self.assertEqual(run("w", "ff0000"), (["colors"], {"#ff0000": ["W"]}))
+                self.assertEqual(run("all", "none", "a", "00ff00", "--live"), (["colors"], {"#00ff00": ["A"]}))
+                self.assertTrue(os.path.exists(z20.COLORS))  # the stored ones stay
+                self.assertEqual(run("reload"), (["colors"], {"#ff0000": ["W"]}))
+                self.assertEqual(run("off", "--live"), (["end"], None))
+                self.assertEqual(run("reload"), (["colors"], {"#ff0000": ["W"]}))
+                self.assertEqual(run("all", "none"), (["end"], None))  # nothing set: none stored
+                self.assertFalse(os.path.exists(z20.COLORS))
+                z20.animation_state = lambda: {"pid": 1}
+                self.assertEqual(run("w", "ff0000"), ([], {"#ff0000": ["W"]}))  # z20 animate shows them
+            finally:
+                (z20.Keyboard, sys.argv, z20.STATE, z20.COLORS, z20.COLORS_LIVE, z20.animation_state,
+                 z20.backlight_percent) = old
+
+    def test_shapes_dont_overlap_and_centers_are_the_layout(self):
+        for iso in (True, False):
+            shapes = z20.led_shapes(iso)
+            self.assertEqual({p: (x, y) for p, (x, y, _, _) in shapes.items()}, z20.led_layout(iso))
+            rects = [(p, x - w / 2, y - h / 2, x + w / 2, y + h / 2) for p, (x, y, w, h) in shapes.items()]
+            for i, (p, l1, t1, r1, b1) in enumerate(rects):
+                for q, l2, t2, r2, b2 in rects[i + 1:]:
+                    self.assertFalse(l1 < r2 - 1e-9 and l2 < r1 - 1e-9 and t1 < b2 - 1e-9 and t2 < b1 - 1e-9,
+                                     (iso, z20.LED_NAMES[p], z20.LED_NAMES[q]))
+
+
 class Commands(unittest.TestCase):
     """main() with a stand-in keyboard: what the commands print."""
 
