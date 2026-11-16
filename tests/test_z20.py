@@ -745,6 +745,22 @@ class Animate(unittest.TestCase):
             finally:
                 z20.ANIMATION_STATE = old
 
+    def test_the_end_of_the_colors_gets_a_moment_under_the_lock(self):
+        import types
+        done = []  # locks, reports sent (byte 3: 1 colors, 0 their end), sleeps, in order
+        kb = object.__new__(z20.Keyboard)
+        kb.fd = -1
+        saved = z20.fcntl, z20.time.sleep
+        z20.fcntl = types.SimpleNamespace(LOCK_EX="lock", LOCK_UN="unlock", flock=lambda fd, how: done.append(how),
+                                          ioctl=lambda fd, request, report, mutate: done.append(report[3]))
+        z20.time.sleep = done.append
+        try:
+            kb.send_locked(z20.color_report(bytes(z20.LED_COUNT * 4)))
+            kb.send_locked(bytes([6, *z20.HEADER, 0]))
+        finally:
+            z20.fcntl, z20.time.sleep = saved
+        self.assertEqual(done, ["lock", 1, 0.005, "unlock", "lock", 0, z20.COLORS_END_S, "unlock"])
+
 
 class Backlight(unittest.TestCase):
     class Keyboard:

@@ -127,6 +127,7 @@ HEADER = b"\xea\x02"
 READ, WRITE = 1, 0
 SUCCESS = 0xC0
 FAIL = 0xC1
+COLORS_END_S = 0.1  # after ending the colors per LED: the profile's lighting comes back
 
 # Report 4 commands this tool sends, and the ones it may send with WRITE. The
 # firmware also knows reset (02), erase firmware (03), bootloader (04), reset
@@ -403,7 +404,10 @@ class Keyboard:
             fcntl.ioctl(self.fd, ioc(0x06, len(report)), report, True)  # HIDIOCSFEATURE
         except OSError as e:
             raise Z20Error(f"keyboard: {e.strerror} (unplugged?)") from None
-        time.sleep(0.005)
+        # The end of the colors per LED (06 EA 02 00) puts the profile's lighting back: a moment for
+        # that before the next report, also another z20 run's (the lock is held while this waits).
+        # Once, the keyboard reset itself on lighting writes right after it (z20 light after animate).
+        time.sleep(COLORS_END_S if report[:4] == bytes([6, *HEADER, 0]) else 0.005)
 
     def send_locked(self, request):
         """send() for a Keyboard opened with lock=False: holds the lock only while sending.
