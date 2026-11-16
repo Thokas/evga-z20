@@ -10,7 +10,8 @@
  * distance graph. The profile names (`z20 profile --json`) and what the
  * presence service does (`z20 presence settings --json`) change rarely: read
  * at the start, when `fast` turns on and after a rename, with the lighting
- * presets (~/.config/z20/presets.json). The macros (`z20
+ * presets (~/.config/z20/presets.json) and the one applied last
+ * (~/.local/state/z20/preset). The macros (`z20
  * macros --json`, slow: each one is read on its own) only when asked for; a
  * change to one comes back from z20 as it was stored. With `watchEvents`,
  * `z20 events --json --wait 30` waits in between for what the keyboard
@@ -63,6 +64,8 @@ QtObject {
     // and whether the first read of all this came in.
     property string presetsText: ""
     property bool detailsRead: false
+    // The name of the preset applied last, from the widget or the app (~/.local/state/z20/preset).
+    property string appliedPreset: ""
     // z20 macros --json ({"N": {name, actions}}); null until refreshMacros() read them.
     property var macros: null
     // z20 leds --json: the keyboard to draw ({model, layout, leds: [{led, name, x, y, w, h}]}, in keys);
@@ -90,6 +93,8 @@ QtObject {
     readonly property var lighting: status ? status.lighting : null
     // The software effect z20 animate runs over the lighting, or null.
     readonly property var animation: status ? status.animation || null : null
+    // What shows: z20's software effect over the lighting, else the keyboard's own ("" until read).
+    readonly property string effectShown: animation ? animation.effect : lighting ? lighting.effect : ""
     // The Z20's own keyboard light (z20 backlight): {percent, shown, off, dimmed, service, led}; null with a z20
     // from before 2026-11-12.
     readonly property var backlight: status ? status.backlight || null : null
@@ -193,8 +198,28 @@ QtObject {
         stepped.restart();
     }
 
-    // A lighting preset (see presets.js); live: only for now, to try it.
-    function applyPreset(preset, live) { runAll(Presets.commands(preset, live)); }
+    // A lighting preset (see presets.js); live: only for now, to try it. Stored, it is the one applied, for the
+    // widget and the app alike.
+    function applyPreset(preset, live) {
+        if (live) {
+            runAll(Presets.commands(preset, true));
+            return;
+        }
+        appliedPreset = preset.name;
+        _exec(_chain(Presets.commands(preset, false)) + " && " + _appliedCommand(preset.name));
+    }
+    // Whether the preset is the one applied: by its name, while its effect still shows (not after a change
+    // with the keyboard's keys, z20 or the presence service's lighting while away).
+    function isApplied(preset) {
+        return !!preset && preset.name === appliedPreset && preset.effect === effectShown;
+    }
+    // The applied preset was renamed: it stays the one applied.
+    function renameApplied(from, to) {
+        if (appliedPreset && appliedPreset === from) {
+            appliedPreset = to;
+            _exec(_appliedCommand(to));
+        }
+    }
     // Back to the stored lighting (and the saved software effect, if any).
     function restoreLighting() { runAll(Presets.RESTORE); }
     // The keyboard light at percent of how the lighting is set; z20 starts its service for it if need be.
@@ -282,7 +307,15 @@ QtObject {
 
     // Several z20 runs, one after the other while they succeed.
     function runAll(list) {
-        _exec(list.map(args => _z20 + " " + args.map(_quote).join(" ")).join(" && "));
+        _exec(_chain(list));
+    }
+
+    function _chain(list) {
+        return list.map(args => _z20 + " " + args.map(_quote).join(" ")).join(" && ");
+    }
+
+    function _appliedCommand(name) {
+        return 'mkdir -p "$HOME/.local/state/z20" && printf "%s" ' + _quote(name) + ' > "$HOME/.local/state/z20/preset"';
     }
 
     // --- plumbing --------------------------------------------------------
@@ -292,7 +325,8 @@ QtObject {
     readonly property string _readCommand: _z20 + " status --json || echo; " + _z20 + " sensor --json || echo; "
         + "systemctl --user is-active z20-presence.service"
     readonly property string _detailCommand: _z20 + " profile --json || echo; " + _z20
-        + " presence settings --json || echo; cat \"$HOME/.config/z20/presets.json\" 2>/dev/null | tr -d '\\n'; echo"
+        + " presence settings --json || echo; cat \"$HOME/.config/z20/presets.json\" 2>/dev/null | tr -d '\\n'; echo; "
+        + "cat \"$HOME/.local/state/z20/preset\" 2>/dev/null | tr -d '\\n'; echo"
     readonly property string _sensorCommand: _z20 + " sensor --json"
     readonly property string _macrosCommand: _z20 + " macros --json"
     readonly property string _ledsCommand: _z20 + " leds --json"
@@ -412,6 +446,7 @@ QtObject {
         profiles = listed || profiles;
         presenceSettings = _parse(lines[1]);
         presetsText = (lines[2] || "").trim();
+        appliedPreset = (lines[3] || "").trim();
         detailsError = listed ? "" : ((data.stderr || "").trim().split("\n").pop().replace(/^z20: /, "")
                                       || i18n("No answer from z20"));
         detailsRead = true;

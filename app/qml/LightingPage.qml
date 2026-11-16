@@ -8,7 +8,9 @@
  * group: WASD, arrows, ...), then a color, dark, or the effect again. Above
  * the drawing: try it on the keyboard (only for now: what is stored comes
  * back with "Back to stored"), or have every change shown there as it's
- * made. Saved a moment after each change (~/.config/z20/presets.json).
+ * made, or apply it (stored, as the widget's popup applies one). The one
+ * applied, here or in the popup, is marked, and the page opens on it.
+ * Saved a moment after each change (~/.config/z20/presets.json).
  */
 
 import QtQuick
@@ -36,14 +38,33 @@ Kirigami.Page {
             .sort((a, b) => b.names.length - a.names.length);
     }
 
-    Component.onCompleted: z20.refreshLeds()
+    Component.onCompleted: {
+        z20.refreshLeds();
+        z20.refresh();  // what shows, to find the preset applied
+    }
 
-    // The presets once read (the defaults while there are none stored).
+    // The presets once read (the defaults while there are none stored); then the one applied is picked, once
+    // the keyboard's state is read too.
+    property bool chosen: false
     Connections {
         target: z20
         function onDetailsReadChanged() {
             if (z20.detailsRead && !page.presets.length) {
                 page.presets = Presets.parse(z20.presetsText);
+            }
+            page.chooseApplied();
+        }
+        function onStatusChanged() {
+            page.chooseApplied();
+        }
+    }
+
+    function chooseApplied() {
+        if (!chosen && presets.length && z20.status) {
+            chosen = true;
+            const applied = presets.findIndex(p => z20.isApplied(p));
+            if (applied >= 0) {
+                current = applied;
             }
         }
     }
@@ -61,6 +82,9 @@ Kirigami.Page {
     function change(key, value) {
         const list = presets.slice();
         const p = Object.assign({}, list[current]);
+        if (key === "name") {
+            z20.renameApplied(p.name, value);
+        }
         if (value === undefined) {
             delete p[key];
         } else {
@@ -198,9 +222,18 @@ Kirigami.Page {
                             spacing: Kirigami.Units.smallSpacing
 
                             RowLayout {
+                                // The one applied (from the popup or here).
+                                Kirigami.Icon {
+                                    visible: z20.isApplied(modelData)
+                                    source: "checkmark"
+                                    color: item.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                                    implicitWidth: Kirigami.Units.iconSizes.small
+                                    implicitHeight: implicitWidth
+                                }
                                 QQC2.Label {
                                     text: modelData.name
                                     color: item.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                                    font.bold: z20.isApplied(modelData)
                                     elide: Text.ElideRight
                                     Layout.fillWidth: true
                                 }
@@ -315,15 +348,39 @@ Kirigami.Page {
                     columnSpacing: Kirigami.Units.largeSpacing
                     Layout.fillWidth: true
 
-                    Kirigami.Heading {
-                        level: 2
-                        text: page.preset ? page.preset.name : ""
-                        elide: Text.ElideRight
+                    RowLayout {
+                        spacing: Kirigami.Units.largeSpacing
                         Layout.fillWidth: true
+
+                        Kirigami.Heading {
+                            level: 2
+                            text: page.preset ? page.preset.name : ""
+                            elide: Text.ElideRight
+                            Layout.fillWidth: !applied.visible
+                        }
+                        QQC2.Label {
+                            id: applied
+                            visible: z20.isApplied(page.preset)
+                            text: i18n("Applied")
+                            color: Kirigami.Theme.positiveTextColor
+                            Layout.fillWidth: true
+                        }
                     }
                     RowLayout {
                         spacing: Kirigami.Units.smallSpacing
 
+                        QQC2.Button {
+                            icon.name: "dialog-ok-apply"
+                            text: i18n("Apply")
+                            enabled: !!page.preset
+                            onClicked: {
+                                showLive.checked = false;
+                                z20.applyPreset(page.preset, false);
+                            }
+                            QQC2.ToolTip.text: i18n("Stored in the active profile (a software effect: as z20's animate "
+                                                    + "service runs it, also after login), as the popup applies it")
+                            QQC2.ToolTip.visible: hovered
+                        }
                         QQC2.Button {
                             icon.name: "media-playback-start"
                             text: i18n("Try on the Keyboard")
