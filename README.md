@@ -27,8 +27,11 @@ hidraw.
   locks the screen, pauses media and the like each time you leave and come
   back
 - **Profiles for programs:** while a game or other program runs, the
-  keyboard is on its profile, and back on the one from before when it ends,
-  as Unleash RGB links profiles to games (a user service)
+  keyboard is on its profile, and back on the one from before when it ends
+  (a user service; Unleash RGB 1.0.28 has nothing like it)
+- **Settings app** (`z20-settings`): lighting presets on a drawing of the
+  keyboard with colors per key, macros, profile names, profiles for
+  programs, presence and the keyboard's own settings, in a window
 - **JSON output** for widgets and scripts
 
 Before every change it saves what it replaces, and after the write it reads
@@ -384,7 +387,7 @@ and touchpad on / off / toggle.
 
 ### Profiles for programs
 
-As Unleash RGB links a profile to a game: while a program runs, the
+A profile for a game or any program: while it runs, the
 `z20-apps` user service has the keyboard on its profile, and when it ends,
 back on the profile it was on before. If you switched profiles meanwhile
 (Fn + 1-9, the widget, `z20 profile`), it leaves yours.
@@ -431,11 +434,34 @@ a program runs (`z20 apps off`, logging out), it also goes back to the
 profile from before. A switch loads the profile's lighting, as Fn + 1-9
 does.
 
+### The settings app
+
+`z20-settings` has the settings in a window, a page each: **Lighting** (the
+lighting presets on a drawing of the keyboard that runs them, colors of
+single keys over the effect, a color picker with the desktop's colors),
+**Macros**, **Profiles** (their names), **Programs** (profiles for
+programs), **Presence** (what the presence service does, and what the
+keyboard itself does when you leave) and **Keyboard** (report rate,
+rollover, the keys Game Mode blocks). It is in the application menu as
+"EVGA Z20"; `z20-settings macros` opens it on a page, and run again while
+it is open, the open one shows that page (as the Plasma widget's pencils
+do). It changes the keyboard through `z20`, at once; the presets are kept
+in `~/.config/z20/presets.json`, which the widget's popup offers too.
+
+It is QML with KDE's Kirigami, run by a small Python launcher; it needs
+PyQt6 and Kirigami as the distribution has them (Debian, Ubuntu:
+`python3-pyqt6`, `qml6-module-org-kde-kirigami`,
+`qml6-module-org-kde-kcmutils`, `qml6-module-org-kde-plasma-plasma5support`;
+a KDE Plasma desktop has all but PyQt6). The QML is in `app/qml`;
+`app/qml/lib/Z20Data.qml` talks to `z20` for the app and for the
+[Plasma widget](https://github.com/Thokas/plasma-evgaz20), whose install
+copies it from here.
+
 ## Install
 
 ```
 git clone https://github.com/Thokas/evga-z20.git && cd evga-z20
-./install.sh                     # z20 to ~/.local/bin
+./install.sh                     # z20 and z20-settings to ~/.local/bin
 # once, as root: let the logged-in user reach the keyboard's configuration interface
 sudo install -m644 udev/70-evga-z20.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw --action=change
@@ -506,7 +532,8 @@ Tests (offline, no keyboard needed): `python3 -I -m unittest discover -s tests`
 
 ```
 systemctl --user disable --now z20-presence.service z20-animate.service z20-backlight.service z20-apps.service
-rm ~/.local/bin/z20 ~/.config/systemd/user/z20-{presence,animate,backlight,apps}.service
+rm ~/.local/bin/z20 ~/.local/bin/z20-settings ~/.config/systemd/user/z20-{presence,animate,backlight,apps}.service
+rm -r ~/.local/share/z20 ~/.local/share/applications/de.thokas.z20-settings.desktop
 sudo rm /etc/udev/rules.d/70-evga-z20.rules /etc/modules-load.d/evga-z20.conf
 rm -r ~/.local/state/z20         # the backups too
 ```

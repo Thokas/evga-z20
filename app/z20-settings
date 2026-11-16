@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""z20-settings: the EVGA Z20 keyboard's settings in a window, a page each.
+
+  z20-settings [lighting | macros | profiles | programs | presence | keyboard]
+
+Opens on the page named (else the first). One at a time: run again while one is open, the open one
+shows that page and comes to the front. It changes the keyboard through z20 (~/.local/bin/z20), as
+the Plasma widget does; it needs PyQt6 and KDE's Kirigami as the distribution has them (Debian,
+Ubuntu: python3-pyqt6, qml6-module-org-kde-kirigami, qml6-module-org-kde-kcmutils).
+"""
+import os
+import sys
+import tempfile
+import zlib
+
+PAGES = ("lighting", "macros", "profiles", "programs", "presence", "keyboard")
+APP_ID = "de.thokas.z20-settings"  # the .desktop file's name: the window's app id
+# The QML: next to this script in the checkout (app/qml), else where install.sh puts it.
+QML_DIRS = (os.path.join(os.path.dirname(os.path.realpath(__file__)), "qml"),
+            os.path.expanduser("~/.local/share/z20/app/qml"))
+
+
+def main():
+    page = sys.argv[1] if len(sys.argv) > 1 else ""
+    if page in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if len(sys.argv) > 2 or page and page not in PAGES:
+        print(f"z20-settings: one of {', '.join(PAGES)}, or none", file=sys.stderr)
+        return 2
+    qml = next((d for d in QML_DIRS if os.path.isfile(os.path.join(d, "Main.qml"))), None)
+    if not qml:
+        print("z20-settings: its QML is missing (install.sh puts it in ~/.local/share/z20/app)", file=sys.stderr)
+        return 1
+    try:
+        from PyQt6.QtCore import QObject, QUrl, QMetaObject, Q_ARG, pyqtSlot
+        from PyQt6.QtGui import QGuiApplication, QIcon
+        from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+        from PyQt6.QtQml import QQmlApplicationEngine
+    except ImportError as e:
+        print(f"z20-settings: needs PyQt6 ({e}); Debian, Ubuntu: python3-pyqt6", file=sys.stderr)
+        return 1
+
+    class I18n(QObject):
+        """KDE's i18n() and kin for the QML, as Plasma has them: the text as written (there are no
+        translations), %1, %2, ... filled in."""
+
+        @staticmethod
+        def fill(text, args):
+            for i, a in reversed(list(enumerate(args))):  # %10 before %1
+                text = text.replace(f"%{i + 1}", str(a if not isinstance(a, float) or a % 1 else int(a)))
+            return text
+
+        @pyqtSlot(str, result=str)
+        @pyqtSlot(str, "QVariant", result=str)
+        @pyqtSlot(str, "QVariant", "QVariant", result=str)
+        @pyqtSlot(str, "QVariant", "QVariant", "QVariant", result=str)
+        def i18n(self, text, *args):
+            return self.fill(text, args)
+
+        @pyqtSlot(str, str, result=str)
+        @pyqtSlot(str, str, "QVariant", result=str)
+        @pyqtSlot(str, str, "QVariant", "QVariant", result=str)
+        def i18nc(self, context, text, *args):
+            return self.fill(text, args)
+
+        @pyqtSlot(str, str, "QVariant", result=str)
+        @pyqtSlot(str, str, "QVariant", "QVariant", result=str)
+        def i18np(self, one, many, n, *args):
+            return self.fill(one if n == 1 else many, (n, *args))
+
+        @pyqtSlot(str, str, str, "QVariant", result=str)
+        @pyqtSlot(str, str, str, "QVariant", "QVariant", result=str)
+        def i18ncp(self, context, one, many, n, *args):
+            return self.fill(one if n == 1 else many, (n, *args))
+
+    os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "org.kde.desktop")  # as KDE's own apps look
+    app = QGuiApplication(sys.argv[:1])
+    app.setApplicationName("z20-settings")
+    app.setApplicationDisplayName("EVGA Z20")
+    app.setDesktopFileName(APP_ID)
+    app.setWindowIcon(QIcon.fromTheme("input-keyboard"))
+
+    # One open already: it shows the page, with this start's activation token so it may come to the front.
+    # One per user and home (a test's home of its own has its own), through a socket in the runtime dir.
+    name = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(),
+                        f"z20-settings-{os.getuid()}-{zlib.crc32(os.path.expanduser('~').encode()):08x}")
+    other = QLocalSocket()
+    other.connectToServer(name)
+    if other.waitForConnected(500):
+        other.write(f"{page}\n{os.environ.get('XDG_ACTIVATION_TOKEN', '')}\n".encode())
+        other.waitForBytesWritten(500)
+        other.disconnectFromServer()
+        return 0
+
+    i18n = I18n()
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextObject(i18n)
+    engine.rootContext().setContextProperty("startPage", page)
+    engine.load(QUrl.fromLocalFile(os.path.join(qml, "Main.qml")))
+    if not engine.rootObjects():
+        return 1
+    window = engine.rootObjects()[0]
+
+    def asked():
+        while server.hasPendingConnections():
+            sock = server.nextPendingConnection()
+            sock.waitForReadyRead(500)
+            wanted, token = (bytes(sock.readAll()).decode(errors="replace").split("\n") + ["", ""])[:2]
+            sock.disconnectFromServer()
+            if token:
+                os.environ["XDG_ACTIVATION_TOKEN"] = token  # Qt's Wayland activation takes it from there
+            QMetaObject.invokeMethod(window, "showPage", Q_ARG("QVariant", wanted))
+            window.show()
+            window.raise_()
+            window.requestActivate()
+
+    QLocalServer.removeServer(name)  # left by one that crashed
+    server = QLocalServer()
+    server.newConnection.connect(asked)
+    if not server.listen(name):
+        print(f"z20-settings: {server.errorString()}: run again, it opens another window", file=sys.stderr)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

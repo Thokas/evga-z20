@@ -5,6 +5,14 @@ set -eu
 cd "$(dirname "$0")"
 
 install -Dm755 z20 ~/.local/bin/z20
+# The settings app: its launcher, its QML (which the Plasma widget's install copies its shared part from)
+# and its menu entry, which starts it by its full path (~/.local/bin isn't always on a menu's PATH).
+install -Dm755 app/z20-settings ~/.local/bin/z20-settings
+rm -rf ~/.local/share/z20/app
+mkdir -p ~/.local/share/z20/app ~/.local/share/applications
+cp -r app/qml ~/.local/share/z20/app/
+sed "s|^Exec=z20-settings|Exec=$HOME/.local/bin/z20-settings|" app/de.thokas.z20-settings.desktop \
+    > ~/.local/share/applications/de.thokas.z20-settings.desktop
 for unit in z20-presence.service z20-animate.service z20-backlight.service z20-apps.service; do
     install -Dm644 "systemd/$unit" ~/.config/systemd/user/"$unit"
 done
@@ -37,4 +45,5 @@ To act on the desktop when you leave and come back (settings: ~/.config/z20/pres
 Software effects over the lighting, also after the next login: z20 animate fire --save
 The Z20's own keyboard light, dark while the desktop's is off (the z20-backlight service): z20 backlight 60
 A profile while a program runs (rules: ~/.config/z20/apps.ini): z20 apps add Cyberpunk2077.exe 3; z20 apps on
+The settings in a window (lighting presets, macros, profiles, programs, presence): z20-settings
 MSG

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=EVGA Z20
+GenericName=Keyboard Settings
+Comment=Lighting presets and key colors, macros, profiles and the presence sensor of the EVGA Z20
+Exec=z20-settings
+Icon=input-keyboard
+Categories=Qt;KDE;Settings;HardwareSettings;
+Keywords=keyboard;rgb;lighting;macro;profile;evga;z20;
+StartupNotify=true

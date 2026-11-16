@@ -1264,7 +1264,7 @@ def presence(dry_run):
             desktop.lighting_back()
 
 
-# z20 apps: profiles for programs, as Unleash RGB links a profile to a game. While the program of a rule
+# z20 apps: profiles for programs, a game's or any other's. While the program of a rule
 # runs, the z20-apps service has the keyboard on the rule's profile; when it ends, back on the profile
 # from before, unless the keyboard was switched since (Fn keys, the widget, z20 profile). The rules are
 # apps.ini's lines PROGRAM = PROFILE; of the programs that run, the first rule counts.
