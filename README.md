@@ -578,6 +578,10 @@ rm -r ~/.config/z20 ~/.local/state/z20   # the settings and the backups too
 `uninstall.sh` keeps the settings and the backups. Remove the Plasma widget
 first, with its own `uninstall.sh`, if you have it.
 
+## Changes
+
+What changed in each release: [CHANGELOG.md](CHANGELOG.md).
+
 ## Contributing
 
 Issues and pull requests are welcome on GitHub. GitHub Actions runs the
