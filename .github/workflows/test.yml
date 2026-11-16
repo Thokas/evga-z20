@@ -23,7 +23,7 @@ jobs:
         run: |
           apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             git ca-certificates python3 nodejs >/dev/null
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: z20
         run: python3 -I -m unittest discover -s tests -v
       - name: the app's JavaScript
@@ -44,7 +44,7 @@ jobs:
             qml6-module-org-kde-desktop qml6-module-qtquick-dialogs qml6-module-qtquick-controls \
             qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window \
             qml6-module-qtqml-workerscript >/dev/null
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: the settings app, offscreen
         env:
           Z20_APP_TESTS: required
