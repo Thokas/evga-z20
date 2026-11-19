@@ -146,6 +146,14 @@ SCENARIOS = {
         (10, lambda: page("saveButton.clicked()")),
         (1500, lambda: note(log=log(), dirty_after=page("dirty"))),
     ],
+    # No welcome effect.
+    "welcome-nothing": lambda: [
+        (3500, lambda: page("welcomeBox.activated(welcomeChoices.findIndex(c => c.id === 'nothing'))")),
+        (300, lambda: note(length=page("welcomeLengthBox.enabled"), colors=page("welcomeColors.length"),
+                           ways=page("welcomeWay.visible"))),
+        (10, lambda: page("save()")),
+        (1500, lambda: note(log=log())),
+    ],
     # The barber pole's direction as stored; Explosion, turned inward.
     "welcome-direction": lambda: [
         (3500, lambda: note(ways=json.loads(page("JSON.stringify(welcomeWay.model)")), way=page("welcomeWay.currentText"))),

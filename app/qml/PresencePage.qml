@@ -54,6 +54,7 @@ KCM.SimpleKCM {
     // As z20 sensor welcome takes them and z20 sensor --json reads them (a z20 from before 2026-11-19 read the
     // barber pole and the light bar wave by their long names, the second).
     readonly property var welcomeChoices: [
+        { id: "nothing", text: i18n("Nothing") },
         { id: "fade", text: i18n("Fade") },
         { id: "rows", text: i18n("Rows") },
         { id: "explosion", text: i18n("Explosion") },
@@ -77,7 +78,7 @@ KCM.SimpleKCM {
         keyboardAfter: sensor ? sensor.leave_after_s : 10,
         welcome: sensor ? (welcomeChoices.find(c => c.id === sensor.welcome || c.old === sensor.welcome)
                            || { id: "" }).id : "",
-        welcomeMs: sensor ? sensor.welcome_ms : 5000
+        welcomeMs: sensor && sensor.welcome_ms ? sensor.welcome_ms : 5000  // none with nothing
     })
     // The changes not saved yet, by those keys (and the welcome effect's own: welcomeColors, welcomeDirection,
     // welcomeBrightness), and what Save sent, until a read has it (z20.settled): a change right after Save
@@ -180,7 +181,10 @@ KCM.SimpleKCM {
         if (("keyboardLeave" in d || "keyboardAfter" in d) && keyboardChoices.some(c => c.id === keyboardLeave)) {
             words.push("leave", keyboardLeave, keyboardAfter);
         }
-        if (["welcome", "welcomeMs"].concat(Object.keys(ownKeys)).some(k => k in d) && welcome !== "") {
+        const welcomeChanged = ["welcome", "welcomeMs"].concat(Object.keys(ownKeys)).some(k => k in d);
+        if (welcomeChanged && welcome === "nothing") {
+            words.push("welcome", "nothing");
+        } else if (welcomeChanged && welcome !== "") {
             words.push("welcome", welcome, welcomeMs, ...("welcomeColors" in d ? d.welcomeColors : []),
                        ...("welcomeDirection" in d ? [d.welcomeDirection] : []),
                        ...("welcomeBrightness" in d ? [d.welcomeBrightness + "%"] : []));
@@ -615,7 +619,7 @@ KCM.SimpleKCM {
 
             QQC2.SpinBox {
                 id: welcomeLengthBox
-                enabled: !!page.sensor && page.welcome !== ""
+                enabled: !!page.sensor && page.welcome !== "" && page.welcome !== "nothing"
                 from: 500
                 to: 30000
                 stepSize: 500

@@ -24,6 +24,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `z20 sensor --json` as `welcome_colors`), which were red from the factory
   and hardly stood out from a red lighting. `z20 sensor default` resets
   them too.
+- No welcome effect: `z20 sensor welcome nothing`, "Nothing" on the
+  Presence page (effect 0 with no length; Unleash has no such choice).
 - `z20 sensor` takes several settings in a row, written at once
   (`z20 sensor off leave dark 30`).
 - What Unleash sets for an effect besides its colors: `z20 light ... --zone`

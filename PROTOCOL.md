@@ -160,6 +160,10 @@ up, unlock, and leave: nothing, sleep, lock, dark.
 | 179-180 | welcome effect when approaching (effect number, sub mode: explosion's or the barber pole's direction, as Unleash writes it, else 0) | 22, 0 |
 | 181-182 | welcome effect's length, ms | 5000 |
 
+No welcome effect: 0 at 179 with a length of 0 (checked: nothing at
+power-up, the lighting at once). Unleash offers no such choice. A length
+of 0 with an effect still plays it for about a second.
+
 The welcome effect also plays when the keyboard gets power (plugged in, the
 computer starting) with someone in front of the sensor, and doesn't with the
 sensor off: the sensor's first sight counts as someone approaching (checked

@@ -246,6 +246,18 @@ class Sensor(unittest.TestCase):
         self.assertEqual(z20.sensor_settings(q)["welcome_effects"]["barber"]["colors"][:2], ["#00ff00", "#ff00ff"])
         self.assertEqual(z20.sensor_settings(q)["welcome_ms"], z20.sensor_settings(p)["welcome_ms"])
 
+    def test_no_welcome_effect(self):
+        p = profile(1)
+        q = z20.set_sensor(p, ["welcome", "nothing"])
+        self.assertEqual((bytes(q[179:183]), z20.sensor_settings(q)["welcome"]), (bytes(4), "nothing"))
+        self.assertIn("welcome nothing;", z20.sensor_text(z20.sensor_settings(q)))
+        r = z20.set_sensor(q, ["welcome", "thunder"])  # a length again
+        self.assertEqual((z20.sensor_settings(r)["welcome"], z20.sensor_settings(r)["welcome_ms"]), ("thunder", 5000))
+        self.assertEqual(z20.sensor_settings(z20.set_sensor(q, ["welcome", "fade", "800"]))["welcome_ms"], 800)
+        for bad in (["welcome", "nothing", "3000"], ["welcome", "nothing", "ff0000"]):
+            with self.assertRaises(z20.Z20Error, msg=bad):
+                z20.set_sensor(p, bad)
+
     def test_the_welcome_effects_direction_and_brightness(self):
         p = profile(1)
         q = z20.set_sensor(p, ["welcome", "explosion", "in", "ff8000", "40%"])

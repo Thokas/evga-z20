@@ -90,6 +90,7 @@
   z20 sensor default                    the sensor back to the factory setting
   z20 sensor come nothing|wake|unlock [S]           when someone comes (after 0-10 s)
   z20 sensor leave nothing|dark|lock|sleep [S]      when they leave (after 10-999 s)
+  z20 sensor welcome nothing            no effect when someone comes
   z20 sensor welcome fade|rows|explosion|raining|barber|lightbar|thunder [MS] [COLOR ...]
                                         the effect when someone comes, its length and its own
                                         colors (explosion 7, barber 3, lightbar and thunder 1)
@@ -251,7 +252,10 @@ LED_COUNT = 196
 P_SENSOR = 152
 COME = {"nothing": 0xFFFF, "wake": 1, "unlock": 2}  # 0, "turn on", isn't offered by Unleash
 LEAVE = {"nothing": 0xFFFF, "sleep": 1, "lock": 2, "dark": 3}  # 0, "turn off", neither
-WELCOME = {"fade": 16, "rows": 17, "explosion": 18, "raining": 19, "barber": 20, "lightbar": 21, "thunder": 22}
+# Nothing: effect 0 with no length, which Unleash doesn't offer (checked: no flash at power-up; a length of 0
+# with an effect still plays it for about a second, and 0 with a length would be dark that long).
+WELCOME = {"nothing": 0, "fade": 16, "rows": 17, "explosion": 18, "raining": 19, "barber": 20, "lightbar": 21,
+           "thunder": 22}
 # The welcome effects' own settings follow the lighting effects' in the profile (bytes 1662-1805, the
 # P_EXPLOSION to P_THUNDER blocks), laid out like those: zone, start, stop, ..., the cycle in ms at +16,
 # then colors of 4 bytes (brightness, red, green, blue): explosion (its direction at +3, colors per
@@ -996,10 +1000,11 @@ def sensor_settings(p):
     """The sensor's settings; welcome_effects: each welcome effect's own settings (welcome_effects())."""
     u16 = lambda o: p[P_SENSOR + o] | p[P_SENSOR + o + 1] << 8
     name = lambda table, value, extra: {v: k for k, v in table.items()}.get(value, extra.get(value, str(value)))
+    welcome = p[P_SENSOR + 27]
     return {"on": bool(p[P_SENSOR]), "distance_cm": u16(1) / 10,
             "come": name(COME, u16(5), {0: "turn on"}), "come_after_s": u16(3) / 1000,
             "leave": name(LEAVE, u16(9), {0: "turn off"}), "leave_after_s": u16(7),
-            "welcome": EFFECT_NAMES.get(p[P_SENSOR + 27], str(p[P_SENSOR + 27])), "welcome_ms": u16(29),
+            "welcome": "nothing" if not welcome else EFFECT_NAMES.get(welcome, str(welcome)), "welcome_ms": u16(29),
             "welcome_effects": welcome_effects(p)}
 
 
@@ -1008,8 +1013,9 @@ def sensor_text(s):
         return "presence sensor off"
     come = f"come: {s['come']}" + (f" after {s['come_after_s']:g} s" if s["come_after_s"] else "")
     own = s.get("welcome_effects", {}).get(s["welcome"], {})
-    welcome = " ".join([s["welcome"], *own.get("colors", []), *([own["direction"]] if "direction" in own else []),
-                        *([f"{own['brightness']} %"] if "brightness" in own else []), f"{s['welcome_ms']} ms"])
+    welcome = "nothing" if s["welcome"] == "nothing" else " ".join(
+        [s["welcome"], *own.get("colors", []), *([own["direction"]] if "direction" in own else []),
+         *([f"{own['brightness']} %"] if "brightness" in own else []), f"{s['welcome_ms']} ms"])
     return (f"present within {s['distance_cm']:g} cm; {come}, welcome {welcome}; "
             f"leave: {s['leave']} after {s['leave_after_s']} s")
 
@@ -1050,11 +1056,15 @@ def set_sensor(p, words):
         put(9, LEAVE[rest[0]])
         if rest[1:]:
             put(7, round(number(rest[1], 10, 999, "leave after, seconds")))
-    elif what == "welcome" and rest and rest[0] in WELCOME:
+    elif what == "welcome" and rest == ["nothing"]:
+        p[P_SENSOR + 27:P_SENSOR + 31] = bytes(4)
+    elif what == "welcome" and rest and rest[0] in WELCOME and rest[0] != "nothing":
         effect, more = WELCOME[rest[0]], rest[1:]
         if more and re.fullmatch(r"\d+", more[0]) and len(more[0]) < 6:
             put(29, round(number(more[0], 500, 30000, "welcome length, ms")))
             more = more[1:]
+        elif not p[P_SENSOR + 29] and not p[P_SENSOR + 30]:  # after nothing: a length again
+            put(29, 5000)
         colors = [w for w in more if re.fullmatch(r"#?[0-9a-fA-F]{6}", w)]
         levels = [w for w in more if w.endswith("%") and w not in colors]
         ways = [w for w in more if w not in colors and w not in levels]
@@ -1081,7 +1091,8 @@ def set_sensor(p, words):
         p[P_SENSOR + 27:P_SENSOR + 29] = bytes([effect, p[directions[0]] if directions[1] else 0])
     else:
         raise Z20Error("sensor: on | off | distance CM | come nothing|wake|unlock [S] | "
-                       "leave nothing|dark|lock|sleep [S] | welcome " + "|".join(WELCOME) + " [MS] [COLOR ...] "
+                       "leave nothing|dark|lock|sleep [S] | welcome nothing | welcome "
+                       + "|".join(w for w in WELCOME if w != "nothing") + " [MS] [COLOR ...] "
                        "[in|out / left|right] [N%]; several in a row")
     return p
 

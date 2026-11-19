@@ -131,6 +131,7 @@ z20 sensor leave dark 30              when you leave, after 30 s: dark, lock, sl
 z20 sensor come wake 1                when you come, after 1 s: wake, unlock, nothing
 z20 sensor welcome thunder 3000       effect when you come (fade, rows, explosion, raining,
                                       barber, lightbar, thunder) and its length in ms
+z20 sensor welcome nothing            no effect when you come (Unleash has no such choice)
 z20 sensor welcome thunder 0000ff     its own colors (explosion 7, barber 3, lightbar and
                                       thunder 1; fade and rows have the lighting's)
 z20 sensor welcome explosion in 60%   its direction (explosion in, out; barber left, right)

@@ -155,6 +155,12 @@ class App(unittest.TestCase):
         self.assertEqual(sent(r["log"]), ["sensor welcome thunder 3000 0000ff 60%"])
         self.assertFalse(r["dirty_after"])
 
+    def test_no_welcome_effect(self):
+        r, _ = self.drive("welcome-nothing", page="presence", sensor=SENSOR)
+        self.assertEqual((r["length"], r["colors"], r["ways"]), (False, 0, False))
+        sent = [line for line in r["log"] if line.startswith("sensor ") and line != "sensor --json"]
+        self.assertEqual(sent, ["sensor welcome nothing"])
+
     def test_the_welcome_effects_direction(self):
         r, _ = self.drive("welcome-direction", page="presence", sensor=SENSOR)
         self.assertEqual((r["ways"], r["way"]), (["Left", "Right"], "Left"))  # the barber pole's, as stored
