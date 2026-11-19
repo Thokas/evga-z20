@@ -114,6 +114,20 @@ Kirigami.Page {
         update(list);
     }
 
+    // The keys an effect runs on, as Unleash's zones: all, or some of Presets.ZONES (in their order).
+    readonly property var zoneLabels: ({ numpad: i18n("Numpad"), fkeys: i18n("F keys"), numbers: i18n("Number row"),
+                                         arrows: i18n("Arrows"), wasd: i18n("WASD"), bars: i18n("Light bars") })
+
+    function zones() {
+        return !preset || (preset.zone || "all") === "all" ? [] : preset.zone.split(",");
+    }
+
+    function setZone(name, on) {
+        const list = zones().filter(z => z !== name).concat(on ? [name] : []);
+        const ordered = Presets.ZONES.filter(z => list.indexOf(z) >= 0);
+        change("zone", ordered.length ? ordered.join(",") : undefined);
+    }
+
     function setColor(slot, color) {
         const colors = (preset.colors || []).slice();
         colors[slot] = color;
@@ -474,6 +488,8 @@ Kirigami.Page {
                             readonly property bool lit: !!page.preset && page.preset.effect !== "off"
                             readonly property bool hasSpeed: !!page.preset && Presets.HAS_CYCLE.indexOf(page.preset.effect) >= 0
                             readonly property var ways: page.preset ? Presets.DIRECTIONS[page.preset.effect] || [] : []
+                            // The keyboard's own effects can wait for the first key press.
+                            readonly property bool own: lit && !Presets.isSoftware(page.preset.effect)
 
                             QQC2.Label {
                                 text: i18n("Name:")
@@ -506,6 +522,12 @@ Kirigami.Page {
                                     ? i18n("Runs on this computer: z20 works out the colors and sends them 25 times a "
                                            + "second (the z20-animate user service, also after login). It pauses while "
                                            + "the screen is locked; the profile's own lighting shows then.")
+                                    : page.preset && Presets.SENSOR_EFFECTS.indexOf(page.preset.effect) >= 0
+                                    ? i18n("The keyboard runs this effect itself, also as the welcome effect when you "
+                                           + "come to the desk: its colors, direction and brightness are the same "
+                                           + "there (Presence). It goes by the distance the presence sensor measures "
+                                           + "(Explosion: its rings move, in jumps, as you come nearer or move away). "
+                                           + "The drawing is a guess at how it looks.")
                                     : i18n("The keyboard runs this effect itself; the drawing comes close to it.")
                                 font: Kirigami.Theme.smallFont
                                 opacity: 0.7
@@ -636,6 +658,122 @@ Kirigami.Page {
                                 onActivated: index => page.change("direction", ways[index])
                                 // A new model (wave ↔ spiral) puts the ComboBox on its first entry; back to the preset's.
                                 onModelChanged: currentIndex = Qt.binding(() => page.preset ? ways.indexOf(page.preset.direction) : -1)
+                            }
+
+                            QQC2.Label {
+                                visible: parent.own
+                                text: i18n("Keys:")
+                                Layout.alignment: Qt.AlignRight | Qt.AlignTop
+                                Layout.topMargin: Kirigami.Units.smallSpacing
+                            }
+                            Flow {
+                                visible: parent.own
+                                spacing: Kirigami.Units.smallSpacing
+                                Layout.fillWidth: true
+
+                                QQC2.CheckBox {
+                                    id: allKeys
+                                    text: i18n("All")
+                                    checked: page.zones().length === 0
+                                    onToggled: {
+                                        if (checked) {
+                                            page.change("zone", undefined);
+                                        }
+                                        checked = Qt.binding(() => page.zones().length === 0);
+                                    }
+                                }
+                                Repeater {
+                                    model: Presets.ZONES
+
+                                    QQC2.CheckBox {
+                                        text: page.zoneLabels[modelData]
+                                        checked: page.zones().indexOf(modelData) >= 0
+                                        onToggled: {
+                                            page.setZone(modelData, checked);
+                                            checked = Qt.binding(() => page.zones().indexOf(modelData) >= 0);
+                                        }
+                                    }
+                                }
+                            }
+
+                            QQC2.Label {
+                                visible: parent.own
+                                text: i18n("Stops:")
+                                Layout.alignment: Qt.AlignRight
+                            }
+                            QQC2.ComboBox {
+                                id: stopBox
+                                readonly property var labels: [i18n("Never"), i18n("On a key press"),
+                                                               i18n("When the key is let go")]
+                                visible: parent.own
+                                model: labels
+                                currentIndex: page.preset ? Presets.STOPS.indexOf(page.preset.stop || "never") : 0
+                                onActivated: index => {
+                                    page.change("stop", index ? Presets.STOPS[index] : undefined);
+                                    currentIndex = Qt.binding(() => page.preset
+                                        ? Presets.STOPS.indexOf(page.preset.stop || "never") : 0);
+                                }
+                            }
+
+                            QQC2.Label {
+                                visible: !!page.preset && page.preset.effect === "reactive"
+                                text: i18n("Lights:")
+                                Layout.alignment: Qt.AlignRight
+                            }
+                            QQC2.ComboBox {
+                                id: modeBox
+                                visible: !!page.preset && page.preset.effect === "reactive"
+                                model: [i18n("The key pressed"), i18n("One key"), i18n("3×3 around the key")]
+                                currentIndex: page.preset
+                                    ? Presets.REACTIVE_MODES.indexOf(page.preset.mode || "typed") : 0
+                                onActivated: index => {
+                                    page.change("mode", index ? Presets.REACTIVE_MODES[index] : undefined);
+                                    currentIndex = Qt.binding(() => page.preset
+                                        ? Presets.REACTIVE_MODES.indexOf(page.preset.mode || "typed") : 0);
+                                }
+                            }
+
+                            QQC2.Label {
+                                visible: !!page.preset && page.preset.effect === "reactive"
+                                text: i18n("Fade out:")
+                                Layout.alignment: Qt.AlignRight
+                            }
+                            RowLayout {
+                                visible: !!page.preset && page.preset.effect === "reactive"
+
+                                QQC2.Slider {
+                                    id: fadeOut
+                                    from: 0
+                                    to: 100
+                                    stepSize: 1
+                                    value: page.preset && page.preset.fadeOut !== undefined ? page.preset.fadeOut
+                                                                                            : Presets.FADE_OUT
+                                    onMoved: page.change("fadeOut", value === Presets.FADE_OUT ? undefined : value)
+                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                                }
+                                QQC2.Label {
+                                    text: fadeOut.value === 0 ? i18n("slowest") : fadeOut.value === 100
+                                        ? i18n("at once") : String(Math.round(fadeOut.value))
+                                }
+                            }
+
+                            QQC2.Label {
+                                visible: parent.own
+                                text: i18n("Starts:")
+                                Layout.alignment: Qt.AlignRight
+                            }
+                            QQC2.CheckBox {
+                                id: onKey
+                                visible: parent.own
+                                text: i18n("On the first key press")
+                                checked: !!page.preset && !!page.preset.onKey
+                                onToggled: {
+                                    page.change("onKey", checked || undefined);
+                                    checked = Qt.binding(() => !!page.preset && !!page.preset.onKey);
+                                }
+                                QQC2.ToolTip.text: i18n("Dark until then, also after the keyboard is plugged in, the "
+                                                        + "lighting reloaded or the welcome effect played")
+                                QQC2.ToolTip.visible: hovered
                             }
                         }
                     }

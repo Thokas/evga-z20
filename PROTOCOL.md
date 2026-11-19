@@ -157,8 +157,56 @@ up, unlock, and leave: nothing, sleep, lock, dark.
 | 159-160 | time before "leaving" acts, s | 10 |
 | 161-162 | when leaving: 0 turn off, 1 sleep, 2 lock, 3 dark, `FFFF` nothing | dark |
 | 163-178 | 4 gestures, each a key function | disabled |
-| 179-180 | welcome effect when approaching (effect number, sub mode) | 22, 0 |
+| 179-180 | welcome effect when approaching (effect number, sub mode: explosion's or the barber pole's direction, as Unleash writes it, else 0) | 22, 0 |
 | 181-182 | welcome effect's length, ms | 5000 |
+
+The welcome effect also plays when the keyboard gets power (plugged in, the
+computer starting) with someone in front of the sensor, and doesn't with the
+sensor off: the sensor's first sight counts as someone approaching (checked
+2026-11-19). Fade (16) and by row (17) as welcome effects have the lighting
+effects' colors; explosion to thunder (18-22) have settings of their own at
+the end of the profile, laid out like the lighting effects' (zone, start,
+stop, then the cycle in ms at +16), with the factory's values. From
+Unleash 1.0.28's code (its welcome pages; 2026-11-19): explosion's
+direction at +3 (0 outward, 1 inward), the barber pole's random at +3 and
+direction at +4 (0 left, 1 right); Unleash writes zone `80`, start and stop
+0 and the cycles below as they are, and offers the colors (explosion 7 of
+its 8, colors per cycle 7), one brightness for all of them (each color's
+brightness byte; raining's own byte) and the two directions, which it also
+writes into the welcome's sub mode (byte 180).
+
+| Bytes | Welcome effect | Fields from +16 | Factory |
+| ----- | -------------- | --------------- | ------- |
+| 1662-1712 | explosion | cycle ms, colors per cycle, 8 colors | 3000, 7, red and 7 × black |
+| 1713-1731 | raining | cycle ms, brightness (as stars: no colors) | 2000, 255 |
+| 1732-1761 | barber pole | cycle ms, 3 colors | 3000, red, blue, white |
+| 1762-1783 | light bar wave | cycle ms, 1 color | 3000, red |
+| 1784-1805 | thunder | cycle ms, 1 color | 2000, red |
+
+Unleash also offers these five as the lighting: its lighting pages for
+them set the main effect (byte 1288, RAM block `0C`) to 18-22, with
+explosion's and the barber pole's direction as the sub mode, and their own
+blocks are then the lighting's settings as well, in RAM blocks `16`-`1A`
+like the others' (Unleash's LED_Explosion ... ThunderParameters). Checked:
+`0C` set to `12 01` showed explosion (inward), moving on its own and more
+at each key press. It goes by the distance the sensor measures, not by a
+clock: as the welcome effect it stands still on its first frame while you
+sit still (at power-up and on coming back, for 5 s and 30 s alike), and its
+rings move, in jumps and not steadily, as a hand comes nearer the sensor
+or goes away (checked 2026-11-19). The jumps are the sensor's: its
+readings jump too. The other four aren't checked that way; thunder's
+color showed.
+
+Unleash's brightness sliders run 0-100 and put that number into the
+brightness bytes as it is, where the factory has 255 and the lighting
+effects' brightness goes to 255 (z20 backlight's dimming shows it); z20
+writes percent of 255 here as well. Not checked which of the two the
+welcome effects go by.
+
+Checked: with thunder's color at 1802-1805 changed to blue, the keyboard
+flashed blue on being plugged in. The others' colors are read and written
+alike, not each checked; nor whether the cycle bytes act as the lighting
+effects' do.
 
 The current distance: `04 EA 02 41 01`, answer bytes 7-8, mm. Checked over
 a few minutes: 240-430 at the desk, 0.5-1.3 m with the chair pushed back,
@@ -262,7 +310,13 @@ Each effect keeps its own settings, so switching effects keeps what was set
 before. Every block starts with zone (0x80 all; or bits 1 numpad, 2 F keys,
 4 number keys, 8 arrows, 0x10 WASD, 0x20 light bars), start mode (0 with the
 profile, 1 on a key press) and stop mode (0 never, 1 on press, 2 on release).
-Colors are 4 bytes: brightness, red, green, blue.
+Colors are 4 bytes: brightness, red, green, blue. Unleash offers the zones
+as check boxes (All, WASD, Arrows, Number, FN, Numpad, Light bars), the
+start as with the profile or on a key press, the stop as never, on key
+press or on key release. The trigger's fade times (from Unleash's code):
+fade-in Unleash keeps at 0; fade-out comes from its "Fade out" slider
+(0-100) as 82 − s up to 50 and (100 − s) / 1.56 above, so the factory's 32
+is 50 (unit unknown).
 
 | Bytes | Effect | Fields after zone, start, stop |
 | ----- | ------ | ------------------------------ |
@@ -271,7 +325,7 @@ Colors are 4 bytes: brightness, red, green, blue.
 | 1368-1424 | pulse | random, 12 reserved, cycle ms, colors per cycle, on hold %, off hold %, background color, 8 colors |
 | 1425-1475 | spiral | direction (0 clockwise, 1 counter), 12 reserved, cycle ms, colors per cycle, 8 colors |
 | 1476-1526 | wave | random, direction (0 up, 1 down, 2 right, 3 left), 11 reserved, cycle ms, colors per cycle, 8 colors |
-| 1527-1577 | trigger | random, sub mode (0 typed key, 1 one key, 2 3×3 around it), 11 reserved, color shift ms, colors per cycle, 8 colors |
+| 1527-1577 | trigger | random, sub mode (0 typed key, 1 one key, 2 3×3 around it), fade-in time (u16, 1532), fade-out time (u16, 1534), 7 reserved, color shift ms, colors per cycle, 8 colors |
 | 1578-1596 | stars | 13 reserved, cycle ms, brightness |
 | 1597-1616 | fade | random, 1 for the software, 11 reserved, color |
 | 1617-1661 | by row | random, 1 for the software, 11 reserved, colors per cycle, 7 colors |

@@ -152,6 +152,37 @@ function renderer(preset, leds) {
         return still(function (l) { return colors[rows.indexOf(Math.round(l.y * 2)) % colors.length]; });
     case "fade":  // the color fading in and out
         return moving(function (l, t) { return scaled(colors[0], (1 - Math.cos(2 * Math.PI * t / 3)) / 2); });
+    // The presence sensor's effects, as far as seen (explosion) or guessed from their names (the others).
+    case "explosion":  // rings of its colors running out from the middle, or in toward it
+        var cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, inward = preset.direction === "in" ? 1 : -1;
+        return moving(function (l, t) {
+            var k = Math.floor(Math.hypot(l.x - cx, (l.y - cy) * 1.5) / 1.5 + inward * t / 3 * colors.length);
+            return colors[(k % colors.length + colors.length) % colors.length];
+        });
+    case "raining":  // drops falling down the keys, each in a color of its own
+        return moving(function (l, t) {
+            var col = Math.round(l.x * 2), speed = 1 + noise(col);
+            var fall = t / 2 * speed * (y1 - y0 + 2) + noise(col + 0.3) * (y1 - y0 + 2);
+            var drop = Math.floor(fall / (y1 - y0 + 2));
+            var k = Math.max(0, 1 - Math.abs(l.y - y0 - fall % (y1 - y0 + 2)));
+            return scaled(hue(noise(col + drop * 0.7)), k);
+        });
+    case "barber":  // stripes of its colors slanting across the keys, running left or right
+        var right = preset.direction === "right" ? 1 : -1;
+        return moving(function (l, t) {
+            var k = Math.floor((l.x + l.y - right * t / 3 * 6) / 1.5);
+            return colors[(k % colors.length + colors.length) % colors.length];
+        });
+    case "lightbar":  // a wave of its color running along the light bars, the keys dark
+        return moving(function (l, t) {
+            return l.led >= 160 && l.led < 192
+                ? scaled(colors[0], (1 + Math.sin(2 * Math.PI * ((l.y - y0) / (y1 - y0 + 1) - t / 3))) / 2) : black;
+        });
+    case "thunder":  // its color flashing over the keys now and then, as lightning
+        return moving(function (l, t) {
+            var beat = t / 2 % 1;
+            return scaled(colors[0], beat < 0.06 || beat > 0.12 && beat < 0.16 ? 1 : Math.max(0, 0.3 - beat));
+        });
     }
     return softwareRenderer(effect, colors, cycleMs ? cycle : null, leds, x0, x1, y0, y1, level);
 }

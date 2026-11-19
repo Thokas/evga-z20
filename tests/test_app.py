@@ -48,16 +48,26 @@ OWN_WAVE = {"effect": "wave", "colors": ["#ff0000", "#d80c36", "#000000", "#ff00
 RAINBOW = {"effect": "wave", "colors": ["#ff0000", "#ff8000", "#ffff00", "#00ff00", "#00ffff", "#0000ff",
                                         "#ff00ff", "#ff0000"], "direction": "right", "cycle_ms": 3000, "brightness": 100}
 
+# z20 presence settings --json, presence.ini as written by default.
+PRESENCE = {"config": "presence.ini", "exists": True, "leave_after_s": 30.0, "come_after_s": 1.0, "distance_cm": None,
+            "leave": [], "come": [{"action": "wake", "after_s": 0.0}], "leave_run": "", "come_run": "", "away_light": ""}
+
 # z20 sensor --json as the keyboard answers it (its welcome effect named as z20 reads it).
 SENSOR = {"profile": 1, "on": True, "distance_cm": 50.0, "come": "nothing", "come_after_s": 1.0, "leave": "dark",
-          "leave_after_s": 10, "welcome": "barber pole", "welcome_ms": 5000, "distance_mm": 503,
-          "seen": ["near"] * 8, "in_view": True}
+          "leave_after_s": 10, "welcome": "barber", "welcome_ms": 5000, "distance_mm": 503,
+          "seen": ["near"] * 8, "in_view": True,
+          "welcome_effects": {
+              "explosion": {"colors": ["#ff0000"] + ["#000000"] * 6, "direction": "out", "brightness": 100},
+              "raining": {"brightness": 100},
+              "barber": {"colors": ["#ff0000", "#0000ff", "#ffffff"], "direction": "left", "brightness": 100},
+              "lightbar": {"colors": ["#ff0000"], "brightness": 100},
+              "thunder": {"colors": ["#ff0000"], "brightness": 100}}}
 
 
 @unittest.skipIf(MISSING, f"the app's tests need {MISSING}")
 class App(unittest.TestCase):
 
-    def drive(self, scenario, lighting=OWN_WAVE, page="lighting", sensor=None):
+    def drive(self, scenario, lighting=OWN_WAVE, page="lighting", sensor=None, presence=None):
         home, runtime = tempfile.mkdtemp(prefix="z20home"), tempfile.mkdtemp(prefix="z20rt")
         self.addCleanup(shutil.rmtree, home)
         self.addCleanup(shutil.rmtree, runtime)
@@ -68,6 +78,9 @@ class App(unittest.TestCase):
         if sensor:
             with open(os.path.join(home, "sensor.json"), "w") as f:
                 json.dump(sensor, f)
+        if presence:
+            with open(os.path.join(home, "presence.json"), "w") as f:
+                json.dump(presence, f)
         # Nothing of the session: no display, no session bus (D-Bus would start the desktop's services for
         # this home), no XDG dirs.
         env = {k: v for k, v in os.environ.items() if not k.startswith(("QT_", "XDG_", "DBUS_"))
@@ -106,10 +119,25 @@ class App(unittest.TestCase):
         r, _ = self.drive("apply")
         sent = [line for line in r["log"] if line.split()[0] in ("animate", "light", "color")]
         self.assertEqual(sent[-3:], ["animate off", "light wave 0010ff 0060ff 00c0ff 00ffd0 --brightness 100 "
-                                     "--cycle 6000 --direction left", "color all none"])
+                                     "--cycle 6000 --direction left --zone all --stop never --no-on-key", "color all none"])
         self.assertEqual(r["state"], "Ocean")
         self.assertEqual(r["state_renamed"], "Ocean 2")
         self.assertIn("Ocean 2", r["names"])
+
+    def test_a_preset_can_start_on_a_key_press(self):
+        r, _ = self.drive("on-key")
+        self.assertEqual((r["shown"], r["checked"]), (True, True))
+        self.assertTrue(next(p for p in r["presets"] if p["name"] == "Ocean").get("onKey"))
+        self.assertIn("light wave 0010ff 0060ff 00c0ff 00ffd0 --brightness 100 --cycle 6000 --direction left "
+                      "--zone all --stop never --on-key", r["log"])
+
+    def test_a_preset_with_what_unleash_sets_too(self):
+        r, _ = self.drive("unleash")
+        self.assertEqual((r["shown"], r["all_keys"]), ([True, True, True], False))
+        typing = next(p for p in r["presets"] if p["name"] == "Typing")
+        self.assertEqual([typing.get(k) for k in ("zone", "stop", "mode", "fadeOut")], ["arrows,wasd", "release", "3x3", 20])
+        self.assertIn("light reactive 00e0ff --brightness 100 --cycle 300 --zone arrows,wasd --stop release --mode 3x3 "
+                      "--fade-out 20 --no-on-key", r["log"])
 
     def test_keys_get_their_color_stored_and_shown_live(self):
         r, _ = self.drive("keys")
@@ -117,17 +145,42 @@ class App(unittest.TestCase):
         self.assertEqual(r["keys"], {"W": "ff0000", "A": "ff0000"})
         self.assertIn("color all none W,A ff0000 --live", r["log"])
 
-    def test_the_keyboards_welcome_effect_is_shown_and_set(self):
+    def test_the_keyboards_welcome_effect_is_shown_and_saved(self):
         r, _ = self.drive("welcome", page="presence", sensor=SENSOR)
         self.assertEqual((r["shown"], r["length"]), ("Barber pole", 5000))  # as z20 sensor --json names it
-        self.assertEqual(r["chosen"], "Barber pole")
-        self.assertIn("sensor welcome barber 5000", r["log"])
-        self.assertIn("sensor welcome barber 3000", r["log"])  # the length, once it stood still
+        self.assertEqual(r["colors"], ["ff0000", "0000ff", "ffffff"])
+        self.assertEqual((r["chosen"], r["dirty"]), ("Thunder", True))
+        sent = lambda log: [line for line in log if line.startswith("sensor ") and line != "sensor --json"]
+        self.assertEqual(sent(r["unsaved"]), [])  # not before Save
+        self.assertEqual(sent(r["log"]), ["sensor welcome thunder 3000 0000ff 60%"])
+        self.assertFalse(r["dirty_after"])
 
-    def test_the_keyboards_sensor_can_be_switched_off(self):
+    def test_the_welcome_effects_direction(self):
+        r, _ = self.drive("welcome-direction", page="presence", sensor=SENSOR)
+        self.assertEqual((r["ways"], r["way"]), (["Left", "Right"], "Left"))  # the barber pole's, as stored
+        sent = [line for line in r["log"] if line.startswith("sensor ") and line != "sensor --json"]
+        self.assertEqual(sent, ["sensor welcome explosion 5000 in"])
+        self.assertEqual(r["explosion_colors"], 7)
+
+    def test_the_keyboards_sensor_off_and_its_leave_action_in_one_write(self):
         r, _ = self.drive("sensor", page="presence", sensor=SENSOR)
         self.assertEqual((r["on"], r["now"]), (True, "On"))
-        self.assertIn("sensor off", r["log"])
+        sent = lambda log: [line for line in log if line.startswith("sensor ") and line != "sensor --json"]
+        self.assertEqual(sent(r["unsaved"]), [])
+        self.assertEqual(sent(r["log"]), ["sensor off leave lock 10"])
+
+    def test_the_distance_that_counts_as_present(self):
+        r, _ = self.drive("distance", page="presence", sensor=SENSOR, presence={**PRESENCE, "distance_cm": 60.0})
+        self.assertEqual((r["shown"], r["own"], r["band"]), (50, True, 600))  # the service's own counts
+        self.assertEqual(r["band_after"], 450)  # the keyboard's, as set
+        self.assertIn("sensor distance 45", r["log"])
+        self.assertIn("presence --json -- set distance ", r["log"])  # empty: none of its own
+
+    def test_another_page_asks_before_it_drops_changes(self):
+        r, _ = self.drive("discard", page="presence", sensor=SENSOR)
+        self.assertEqual((r["asked"], r["still"]), (True, "presence"))
+        self.assertEqual(r["after"], "keyboard")
+        self.assertFalse([line for line in r["log"] if line.startswith("presence --json")])  # dropped, not saved
 
     def test_the_picker_offers_the_desktops_colors(self):
         r, _ = self.drive("picker")

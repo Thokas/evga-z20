@@ -2,8 +2,13 @@
 /*
  * Lighting presets: a name, an effect and its settings, turned into z20
  * commands. A preset: { name, effect, colors (rrggbb, as many as the effect
- * takes), brightness (%), cycle (ms), direction, keys }. The keyboard's own
- * effects become `z20 light`; the software ones (z20 works out the colors
+ * takes), brightness (%), cycle (ms), direction, zone, onKey, stop, mode,
+ * fadeOut, keys }. The keyboard's own effects become `z20 light`, with what
+ * Unleash sets for them as well: zone, the keys the effect runs on ("all", or
+ * a comma list of ZONES); onKey, it starts on the first key press (dark until
+ * then, also after plugging in or a welcome effect); stop, what stops it
+ * (STOPS); reactive's mode (REACTIVE_MODES) and fadeOut (0-100, as Unleash's
+ * slider: 0 the longest glow); the software ones (z20 works out the colors
  * and sends them 25 times a second) become `z20 animate`. keys: colors of
  * single keys over the effect, { LED name (as z20 leds names it): rrggbb },
  * 000000 dark; `z20 color`, the other keys showing the effect.
@@ -11,18 +16,36 @@
 
 // Effects in the order the editor offers them, with how many colors each takes.
 var EFFECTS = ["off", "static", "breathing", "wave", "spiral", "pulse", "stars", "reactive", "rows", "fade",
+               "explosion", "raining", "barber", "lightbar", "thunder",
                "aurora", "fire", "rain", "ripple", "scanner", "gradient"];
+// The presence sensor's effects, which the keyboard also runs as the lighting (as Unleash offers them):
+// their colors, direction and brightness are the welcome effect's too (z20 sensor welcome).
+var SENSOR_EFFECTS = ["explosion", "raining", "barber", "lightbar", "thunder"];
 var SOFTWARE = ["aurora", "fire", "rain", "ripple", "scanner", "gradient"];
 var LABELS = { off: "Off", static: "Static", breathing: "Breathing", wave: "Wave", spiral: "Spiral", pulse: "Pulse",
                stars: "Stars", reactive: "Reactive (on key press)", rows: "Rows", fade: "Fade",
+               explosion: "Explosion", raining: "Raining", barber: "Barber pole", lightbar: "Light bar wave",
+               thunder: "Thunder",
                aurora: "Aurora (software)", fire: "Fire (software)", rain: "Rain (software)",
                ripple: "Ripples (software)", scanner: "Scanner (software)", gradient: "Gradient (software)" };
 var COLOR_SLOTS = { off: 0, static: 1, breathing: 2, wave: 8, spiral: 8, pulse: 8, stars: 0, reactive: 8, rows: 7,
-                    fade: 1, aurora: 8, fire: 8, rain: 2, ripple: 8, scanner: 1, gradient: 8 };
+                    fade: 1, explosion: 7, raining: 0, barber: 3, lightbar: 1, thunder: 1,
+                    aurora: 8, fire: 8, rain: 2, ripple: 8, scanner: 1, gradient: 8 };
 // Effects with a cycle time (their speed) and with a direction.
 var HAS_CYCLE = ["breathing", "wave", "spiral", "pulse", "stars", "reactive", "aurora", "fire", "rain", "ripple",
                  "scanner"];
-var DIRECTIONS = { wave: ["right", "left", "up", "down"], spiral: ["cw", "ccw"] };
+var DIRECTIONS = { wave: ["right", "left", "up", "down"], spiral: ["cw", "ccw"], explosion: ["out", "in"],
+                   barber: ["left", "right"] };
+// What every keyboard effect has, as z20 light's --zone, --stop, and reactive's --mode, with the factory's first.
+var ZONES = ["numpad", "fkeys", "numbers", "arrows", "wasd", "bars"];  // as z20 lists them
+var STOPS = ["never", "press", "release"];
+var REACTIVE_MODES = ["typed", "one-key", "3x3"];
+var FADE_OUT = 50;  // the factory's
+
+// Fade-out as the keyboard stores it (z20's fade_out_raw): two slider values may be one stored value.
+function fadeOutRaw(s) {
+    return s <= 50 ? 82 - s : Math.floor((100 - s) / 1.56);
+}
 
 var RAINBOW = ["ff0000", "ff8000", "ffff00", "00ff00", "00ffff", "0000ff", "ff00ff"];
 
@@ -69,6 +92,14 @@ function commands(preset, live) {
     if (DIRECTIONS[effect] && preset.direction) {
         a.push("--direction", preset.direction);
     }
+    if (!isSoftware(effect) && effect !== "off") {  // said either way: a preset is the whole effect
+        a.push("--zone", preset.zone || "all", "--stop", preset.stop || "never");
+        if (effect === "reactive") {
+            a.push("--mode", preset.mode || "typed",
+                   "--fade-out", String(preset.fadeOut !== undefined ? Math.round(preset.fadeOut) : FADE_OUT));
+        }
+        a.push(preset.onKey ? "--on-key" : "--no-on-key");
+    }
     if (isSoftware(effect)) {
         a.push(live ? "--live" : "--save");
         return [a, keyColors(preset.keys, live)];
@@ -99,12 +130,22 @@ var RESTORE = [["animate", "reload"], ["light", "reload"], ["color", "reload"]];
 
 // A preset as presence.ini's "away light", which the presence service shows while you are away:
 // its z20 light or animate arguments without --live, as z20 presence settings prints them (without
-// the keys' colors).
+// the keys' colors, without waiting for a key: nobody types while away, and without what is as from
+// the factory, so it reads as before these were there).
 function awayLight(preset) {
     var lighting = commands(preset, true).filter(function (a) {
         return a[0] === "light" || a[0] === "animate" && a[1] !== "off";
     })[0];
-    return lighting.filter(function (a) { return a !== "--live"; }).join(" ");
+    var plain = { "--zone": "all", "--stop": "never", "--mode": "typed", "--fade-out": String(FADE_OUT) };
+    var out = [];
+    for (var i = 0; i < lighting.length; i++) {
+        if (plain[lighting[i]] !== undefined && lighting[i + 1] === plain[lighting[i]]) {
+            i++;
+        } else if (["--live", "--on-key", "--no-on-key"].indexOf(lighting[i]) < 0) {
+            out.push(lighting[i]);
+        }
+    }
+    return out.join(" ");
 }
 
 // The colors as the keyboard keeps them after z20 light: breathing with one goes out to dark, the animated
@@ -130,7 +171,8 @@ function hex(color) {
 
 // Whether the preset is the lighting the keyboard has stored, what a reload brings back: stored, a status of
 // z20 from 2026-11-16 on (z20 status --json: lighting, saved_animation, key_colors). Its effect, colors, speed,
-// brightness, direction and keys' colors, where the preset has them (a preset without colors keeps the
+// brightness, direction, zone, start and stop, reactive's mode and fade-out (z20 from 2026-11-19 on) and keys'
+// colors, where the preset has them (a preset without colors keeps the
 // profile's, so any count).
 function matches(preset, stored) {
     if (!preset || !stored || !stored.lighting) {
@@ -159,7 +201,13 @@ function matches(preset, stored) {
             || Math.abs(l.brightness - preset.brightness) <= 1)  // percent → 0-255 → percent may move by one
         && (HAS_CYCLE.indexOf(preset.effect) < 0 || !preset.cycle || l.cycle_ms === undefined
             || l.cycle_ms === Math.round(preset.cycle))
-        && (!DIRECTIONS[preset.effect] || !preset.direction || !l.direction || l.direction === preset.direction);
+        && (!DIRECTIONS[preset.effect] || !preset.direction || !l.direction || l.direction === preset.direction)
+        && (l.on_key === undefined || !!preset.onKey === l.on_key)
+        && (l.zone === undefined || (preset.zone || "all") === l.zone.join(","))
+        && (l.stop === undefined || (preset.stop || "never") === l.stop)
+        && (l.mode === undefined || (preset.mode || "typed") === l.mode)
+        && (l.fade_out === undefined
+            || fadeOutRaw(preset.fadeOut !== undefined ? preset.fadeOut : FADE_OUT) === fadeOutRaw(l.fade_out));
 }
 
 // The lighting the keyboard has stored (as for matches()) as a preset named name: the software effect where
@@ -170,7 +218,11 @@ function fromKeyboard(stored, name) {
     var p = anim ? { name: name, effect: anim.effect, colors: (anim.colors || []).map(hex),
                      brightness: anim.brightness === null ? 100 : anim.brightness, cycle: anim.cycle_ms }
                  : { name: name, effect: l.effect, colors: (l.colors || []).map(hex), brightness: l.brightness,
-                     cycle: l.cycle_ms, direction: l.direction };
+                     cycle: l.cycle_ms, direction: l.direction, onKey: l.on_key || undefined,
+                     zone: l.zone && l.zone.join(",") !== "all" ? l.zone.join(",") : undefined,
+                     stop: l.stop && l.stop !== "never" ? l.stop : undefined,
+                     mode: l.mode && l.mode !== "typed" ? l.mode : undefined,
+                     fadeOut: l.fade_out !== undefined && l.fade_out !== FADE_OUT ? l.fade_out : undefined };
     if (EFFECTS.indexOf(p.effect) < 0) {
         return null;
     }

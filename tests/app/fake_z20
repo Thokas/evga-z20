@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A stand-in for z20 in a test's home: each run logged ($HOME/z20.log), the status from
-$HOME/status.json, the sensor settings from $HOME/sensor.json if there, nine profiles as from the
-factory, z20 leds from the real z20 ($Z20_REPO/z20: it needs no keyboard), anything else null."""
+$HOME/status.json, the sensor settings from $HOME/sensor.json and presence.ini's from
+$HOME/presence.json if there, nine profiles as from the factory, z20 leds from the real z20
+($Z20_REPO/z20: it needs no keyboard), anything else null."""
 import json
 import os
 import sys
@@ -21,6 +22,9 @@ elif command == "status":
         print(json.dumps(json.load(f)))
 elif command == "sensor" and os.path.exists(os.path.join(home, "sensor.json")):
     with open(os.path.join(home, "sensor.json")) as f:
+        print(json.dumps(json.load(f)))
+elif args[:2] == ["presence", "settings"] and os.path.exists(os.path.join(home, "presence.json")):
+    with open(os.path.join(home, "presence.json")) as f:
         print(json.dumps(json.load(f)))
 elif command == "profile":
     print(json.dumps([{"profile": n, "name": f"DEFAULT {n}", "active": n == 1} for n in range(1, 10)]))

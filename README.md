@@ -95,9 +95,20 @@ z20 light wave | spiral | pulse | stars | reactive | fade | rows
 z20 light wave 0040ff 00e0ff --direction left
                                       or with your own colors (repeated to fill its 7-8);
                                       wave: up, down, left, right; spiral: cw, ccw
+z20 light explosion ff0000 000000 ff8000 --direction in
+                                      the presence sensor's effects as the lighting too
+                                      (explosion, raining, barber, lightbar, thunder), as in
+                                      Unleash; the welcome effect has the same settings
 z20 light ... --profile N             another profile than the active one
 z20 light ... --brightness P          percent, for the effect's colors
 z20 light ... --cycle MS              length of one effect cycle (speed)
+z20 light ... --on-key | --no-on-key  start on the first key press (dark until then, also after
+                                      plugging in or a welcome effect), or as the profile loads
+z20 light ... --zone wasd,arrows      only on some keys: numpad, fkeys, numbers, arrows, wasd,
+                                      bars (comma list), or all
+z20 light ... --stop release          what stops the effect: never, press, release (of a key)
+z20 light reactive --mode 3x3 --fade-out 20   which keys light (typed, one-key, 3x3) and
+                                      how fast they go dark again (0-100, as in Unleash)
 z20 light static 0000ff --live        only in RAM: until reload, profile switch, unplugging
 z20 light reload                      back to the stored lighting
 z20 light default | sensor default    back to the factory setting
@@ -120,6 +131,11 @@ z20 sensor leave dark 30              when you leave, after 30 s: dark, lock, sl
 z20 sensor come wake 1                when you come, after 1 s: wake, unlock, nothing
 z20 sensor welcome thunder 3000       effect when you come (fade, rows, explosion, raining,
                                       barber, lightbar, thunder) and its length in ms
+z20 sensor welcome thunder 0000ff     its own colors (explosion 7, barber 3, lightbar and
+                                      thunder 1; fade and rows have the lighting's)
+z20 sensor welcome explosion in 60%   its direction (explosion in, out; barber left, right)
+                                      and brightness
+z20 sensor off leave dark 30          several at once: one write to the profile
 z20 events [--json] [--wait S]        what the keyboard reports itself (profile, effect and
                                       Game Mode changed with its keys, media keys); with
                                       --wait only the first event within S seconds,
@@ -453,14 +469,15 @@ leave and its welcome effect when you come) and **Keyboard** (report rate,
 rollover, the keys Game Mode blocks). It is in the application menu as "EVGA
 Z20"; `z20-settings macros` opens it on a page, and run again while it is
 open, the open one shows that page (as the Plasma widget's pencils do). It
-changes the keyboard through `z20`, at once; the presets are kept in
-`~/.config/z20/presets.json`, which the widget's popup offers too. On the
-first start the lighting the keyboard has stored is the first preset (a
-built-in one where it is that, else one named after the profile), and
-whichever preset is what the keyboard has stored, however it got there, is
-marked as applied, in the app and in the popup (`z20 status --json` has the
-stored lighting with all its colors and direction, the software effect
-stored, `saved_animation`, and the keys' stored colors, `key_colors`).
+changes the keyboard through `z20`, at once (on the Presence page once you
+Save); the presets are kept in `~/.config/z20/presets.json`, which the
+widget's popup offers too. On the first start the lighting the keyboard has
+stored is the first preset (a built-in one where it is that, else one named
+after the profile), and whichever preset is what the keyboard has stored,
+however it got there, is marked as applied, in the app and in the popup
+(`z20 status --json` has the stored lighting with all its colors and
+direction, the software effect stored, `saved_animation`, and the keys'
+stored colors, `key_colors`).
 
 It is QML with KDE's Kirigami, run by a small Python launcher; it needs
 PyQt6 and Kirigami as the distribution has them (Debian, Ubuntu:
@@ -573,6 +590,30 @@ above, else it is skipped. Forgejo runs both on every push
   (the profile, the lighting in RAM, the general settings) and isn't
   reported, so `z20` can't show or set it. `--brightness` sets the
   brightness of the effect's colors instead.
+- Settings the keyboard keeps that Unleash doesn't offer either (from a
+  survey of the profiles and Unleash 1.0.28's code, 2026-11-19; none tried
+  on the keyboard yet):
+  - an effect's "random" byte (breathing, pulse, wave, trigger, fade, rows,
+    the barber pole; static's in RAM), which Unleash always writes as 0;
+  - colors per cycle (pulse, spiral, wave, trigger, rows, explosion), always
+    7 from Unleash: fewer of the 8 colors in a cycle?
+  - breathing's and pulse's hold times and pulse's background color, which
+    Unleash keeps fixed;
+  - the welcome effects' cycle time and their zone, start and stop, which
+    Unleash writes fixed;
+  - the trigger's fade-in time (u16 at 1532), always 0 from Unleash;
+  - the presence sensor's 4 gestures (163-178), key functions neither
+    Unleash nor z20 uses;
+  - "1 for the software" in fade and rows (1601, 1621) and report 15's 264
+    bytes "kept for the software": room for z20's own;
+  - report 4: `30` turns the Fn key off (Unleash's library has it, its
+    window doesn't seem to), `33` has the keyboard report the position of
+    each key pressed (status event 6), which could drive reactive software
+    effects;
+  - the welcome effects' RAM blocks (report 7, `16`-`1A`), a way to try
+    their settings without writing the profile; z20 doesn't send to them;
+  - bytes 183-184, `00 00` in every profile read so far between `FF`s:
+    unknown.
 
 ## Uninstall
 

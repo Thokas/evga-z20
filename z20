@@ -30,10 +30,22 @@
   z20 light wave | spiral | pulse | reactive | rows [COLOR ...] | stars | fade
                                         that effect; colors given repeat to fill its 7-8,
                                         without colors it keeps the ones the profile has
-  z20 light ... --direction D           wave: up, down, left, right; spiral: cw, ccw
+  z20 light explosion | barber [COLOR ...] | lightbar | thunder [COLOR] | raining
+                                        the presence sensor's effects as the lighting, as in
+                                        Unleash: their settings are the welcome effect's too
+  z20 light ... --direction D           wave: up, down, left, right; spiral: cw, ccw;
+                                        explosion: in, out; barber: left, right
   z20 light ... --profile N             another profile than the active one
   z20 light ... --brightness P          percent (0-100) for the effect's colors
   z20 light ... --cycle MS              length of one effect cycle (speed)
+  z20 light ... --on-key | --no-on-key  start on the first key press (dark until then, also after
+                                        plugging in or a welcome effect), or as the profile loads
+  z20 light ... --zone Z                the keys it runs on: all, or some of numpad, fkeys,
+                                        numbers, arrows, wasd, bars (comma list)
+  z20 light ... --stop never|press|release   what stops it: nothing, a key press, its release
+  z20 light reactive ... --mode typed|one-key|3x3 --fade-out N
+                                        which keys light on a key press, and how fast they go
+                                        dark again (0-100, as in Unleash; 0 the longest glow)
   z20 light ... --live                  only in RAM: shown at once, never written to flash, gone
                                         with z20 light reload, a profile switch or unplugging
   z20 light reload                      back to the lighting the profile has stored
@@ -78,8 +90,12 @@
   z20 sensor default                    the sensor back to the factory setting
   z20 sensor come nothing|wake|unlock [S]           when someone comes (after 0-10 s)
   z20 sensor leave nothing|dark|lock|sleep [S]      when they leave (after 10-999 s)
-  z20 sensor welcome fade|rows|explosion|raining|barber|lightbar|thunder [MS]
-                                        the effect when someone comes, and its length
+  z20 sensor welcome fade|rows|explosion|raining|barber|lightbar|thunder [MS] [COLOR ...]
+                                        the effect when someone comes, its length and its own
+                                        colors (explosion 7, barber 3, lightbar and thunder 1)
+  z20 sensor welcome explosion in|out | barber left|right   its direction
+  z20 sensor welcome thunder 60%        its brightness (explosion to thunder)
+  z20 sensor leave dark 30 welcome thunder 0000ff   several settings at once, one write
   z20 sensor ... --profile N            another profile than the active one
   z20 presence [--dry-run]              act on the desktop when you leave and come back
                                         (settings: ~/.config/z20/presence.ini; runs until stopped,
@@ -170,29 +186,51 @@ P_TRIGGER = 1527
 P_STARS = 1578
 P_FADE = 1597
 P_ROWS = 1617
+# The effects for the presence sensor, which Unleash also offers as the lighting: their settings serve
+# both, the welcome effect (when someone comes) and the lighting.
+P_EXPLOSION = 1662
+P_RAINING = 1713
+P_BARBER = 1732
+P_LIGHTBAR = 1762
+P_THUNDER = 1784
 
 EFFECTS = {"off": 0, "static": 1, "breathing": 2, "pulse": 3, "spiral": 4, "wave": 5, "stars": 6,
-           "reactive": 7, "fade": 16, "rows": 17}
-EFFECT_NAMES = {**{v: k for k, v in EFFECTS.items()}, 18: "explosion", 19: "raining", 20: "barber pole",
-                21: "light bar wave", 22: "thunder", 23: "recorded"}
+           "reactive": 7, "fade": 16, "rows": 17, "explosion": 18, "raining": 19, "barber": 20, "lightbar": 21,
+           "thunder": 22}
+EFFECT_NAMES = {**{v: k for k, v in EFFECTS.items()}, 23: "recorded"}
 # Per effect: the byte after the main effect (Unleash writes the effect's direction or
 # sub mode there), its cycle time, and its colors (offset, count, bytes per color;
 # brightness is the first byte of a color, after the hold percentage of breathing's).
-EFFECT_SUB = {4: P_SPIRAL + 3, 5: P_WAVE + 4, 7: P_TRIGGER + 4}
+EFFECT_SUB = {4: P_SPIRAL + 3, 5: P_WAVE + 4, 7: P_TRIGGER + 4, 18: P_EXPLOSION + 3, 20: P_BARBER + 4}
 EFFECT_CYCLE = {2: P_BREATHING + 16, 3: P_PULSE + 16, 4: P_SPIRAL + 16, 5: P_WAVE + 16,
                 6: P_STARS + 16, 7: P_TRIGGER + 16}
 EFFECT_COLORS = {1: (P_STATIC + 16, 1, 4), 2: (P_BREATHING + 18, 2, 5), 3: (P_PULSE + 25, 8, 4),
                  4: (P_SPIRAL + 19, 8, 4), 5: (P_WAVE + 19, 8, 4), 7: (P_TRIGGER + 19, 8, 4),
-                 16: (P_FADE + 16, 1, 4), 17: (P_ROWS + 17, 7, 4)}
+                 16: (P_FADE + 16, 1, 4), 17: (P_ROWS + 17, 7, 4),  # explosion: 7 of 8, as Unleash
+                 18: (P_EXPLOSION + 19, 7, 4), 20: (P_BARBER + 18, 3, 4), 21: (P_LIGHTBAR + 18, 1, 4),
+                 22: (P_THUNDER + 18, 1, 4)}
 P_STARS_BRIGHTNESS = P_STARS + 18
+# The effects with a brightness of their own instead of their colors': stars, raining.
+OWN_BRIGHTNESS = {6: P_STARS_BRIGHTNESS, 19: P_RAINING + 18}
 # Every brightness byte of an effect (what z20 backlight dims): its colors', pulse's background
-# color's (after on hold % and off hold %), stars' own.
+# color's (after on hold % and off hold %), stars' and raining's own.
 BRIGHTNESS_AT = {mode: [offset + i * size + size - 4 for i in range(count)]
                  for mode, (offset, count, size) in EFFECT_COLORS.items()}
 BRIGHTNESS_AT[3].append(P_PULSE + 21)
-BRIGHTNESS_AT[6] = [P_STARS_BRIGHTNESS]
-# --direction: the wave's and the spiral's (stored where EFFECT_SUB points)
-DIRECTIONS = {5: {"up": 0, "down": 1, "right": 2, "left": 3}, 4: {"cw": 0, "ccw": 1}}
+BRIGHTNESS_AT.update({mode: [at] for mode, at in OWN_BRIGHTNESS.items()})
+# --direction: the wave's, the spiral's, explosion's and the barber pole's (stored where EFFECT_SUB points)
+DIRECTIONS = {5: {"up": 0, "down": 1, "right": 2, "left": 3}, 4: {"cw": 0, "ccw": 1}, 18: {"out": 0, "in": 1},
+              20: {"left": 0, "right": 1}}
+# Each effect block starts with zone, start mode and stop mode, as Unleash sets them: the keys it runs on
+# (bits; all: every key, the light bars and the logo), whether it starts as the profile loads or on the first
+# key press, and whether a key press or its release stops it.
+ZONES = {"all": 0x80, "numpad": 0x01, "fkeys": 0x02, "numbers": 0x04, "arrows": 0x08, "wasd": 0x10, "bars": 0x20}
+STOPS = {"never": 0, "press": 1, "release": 2}
+# Reactive (trigger): which keys light on a key press (its sub mode), and how long they glow after, as
+# Unleash's "Fade out" slider has it (0 the longest, 100 none; stored as a time, u16 at +7: 82 - s up to 50,
+# (100 - s) / 1.56 above; the factory's 32 is 50). Its fade-in, u16 at +5, Unleash keeps at 0.
+REACTIVE_MODES = {"typed": 0, "one-key": 1, "3x3": 2}
+P_TRIGGER_FADE_OUT = P_TRIGGER + 7
 
 # Report 7: the active profile's lighting in RAM, one block at a time, the same layout as in
 # the profile, padded to 128 bytes: 07 EA 02 <block> <00 write / 01 read> 00 <status> <checksum>.
@@ -200,7 +238,9 @@ DIRECTIONS = {5: {"up": 0, "down": 1, "right": 2, "left": 3}, 4: {"cw": 0, "ccw"
 RAM_EFFECT = 0x0C  # effect number and sub mode
 RAM_BLOCKS = {1: (0x0D, P_STATIC, 20), 2: (0x0E, P_BREATHING, 28), 3: (0x0F, P_PULSE, 57),
               4: (0x10, P_SPIRAL, 51), 5: (0x11, P_WAVE, 51), 7: (0x12, P_TRIGGER, 51),
-              6: (0x13, P_STARS, 19), 16: (0x14, P_FADE, 20), 17: (0x15, P_ROWS, 45)}  # effect: block, profile offset, size
+              6: (0x13, P_STARS, 19), 16: (0x14, P_FADE, 20), 17: (0x15, P_ROWS, 45),
+              18: (0x16, P_EXPLOSION, 51), 19: (0x17, P_RAINING, 19), 20: (0x18, P_BARBER, 30),
+              21: (0x19, P_LIGHTBAR, 22), 22: (0x1A, P_THUNDER, 22)}  # effect: block, profile offset, size
 # Report 6: colors per LED, shown until stopped: 06 EA 02 <01 show / 00 stop> 00 00 00 <checksum>,
 # then brightness, red, green, blue for each of 196 LED positions (keys, light bars, logo).
 LED_COUNT = 196
@@ -212,6 +252,19 @@ P_SENSOR = 152
 COME = {"nothing": 0xFFFF, "wake": 1, "unlock": 2}  # 0, "turn on", isn't offered by Unleash
 LEAVE = {"nothing": 0xFFFF, "sleep": 1, "lock": 2, "dark": 3}  # 0, "turn off", neither
 WELCOME = {"fade": 16, "rows": 17, "explosion": 18, "raining": 19, "barber": 20, "lightbar": 21, "thunder": 22}
+# The welcome effects' own settings follow the lighting effects' in the profile (bytes 1662-1805, the
+# P_EXPLOSION to P_THUNDER blocks), laid out like those: zone, start, stop, ..., the cycle in ms at +16,
+# then colors of 4 bytes (brightness, red, green, blue): explosion (its direction at +3, colors per
+# cycle, 7 colors and an 8th Unleash leaves), raining (a brightness, as stars), barber pole (direction
+# at +4, 3 colors), light bar wave (1), thunder (1). What Unleash offers: those colors, one brightness
+# for all of them (raining's own), and explosion's and the barber pole's direction, which it also puts
+# into the welcome's sub mode (byte 180). Checked: thunder's color is the one it shows. Fade and rows
+# have the lighting effects' own colors.
+P_WELCOME = P_EXPLOSION
+WELCOME_COLORS = {n: EFFECT_COLORS[n][:2] for n in (18, 20, 21, 22)}  # effect: first color, count
+WELCOME_DIRECTIONS = {n: (EFFECT_SUB[n], DIRECTIONS[n]) for n in (18, 20)}
+WELCOME_RAINING_BRIGHTNESS = OWN_BRIGHTNESS[19]
+SENSOR_SETTINGS = ("on", "off", "distance", "come", "leave", "welcome")
 # The sensor settings are also in RAM (report 7 blocks 03-0A); z20 doesn't write them there
 # (see update_ram).
 # The keyboard's verdict on each measurement of the sensor (general 0x41, bytes 9-16).
@@ -811,18 +864,29 @@ def lighting(p):
         state["direction"] = {v: k for k, v in DIRECTIONS[effect].items()}.get(p[EFFECT_SUB[effect]])
     if effect in EFFECT_CYCLE:
         state["cycle_ms"] = p[EFFECT_CYCLE[effect]] | p[EFFECT_CYCLE[effect] + 1] << 8
-    if effect == 6:
-        state["brightness"] = round(p[P_STARS_BRIGHTNESS] * 100 / 255)
+    if effect in OWN_BRIGHTNESS:
+        state["brightness"] = round(p[OWN_BRIGHTNESS[effect]] * 100 / 255)
     elif effect in EFFECT_COLORS:  # the brightness byte of the effect's first color
         offset, _, size = EFFECT_COLORS[effect]
         state["brightness"] = round(p[offset + size - 4] * 100 / 255)
+    if effect in RAM_BLOCKS:  # on_key: dark until the first key press, after plugging in, a reload, a welcome effect
+        at = RAM_BLOCKS[effect][1]
+        state.update(zone=zone_names(p[at]), on_key=p[at + 1] == 1,
+                     stop={v: k for k, v in STOPS.items()}.get(p[at + 2], str(p[at + 2])))
+    if effect == 7:
+        state["mode"] = {v: k for k, v in REACTIVE_MODES.items()}.get(p[EFFECT_SUB[7]], str(p[EFFECT_SUB[7]]))
+        state["fade_out"] = fade_out_slider(p[P_TRIGGER_FADE_OUT] | p[P_TRIGGER_FADE_OUT + 1] << 8)
     return state
 
 
 def lighting_text(state):
     colors = state.get("colors", [])
     return " ".join([state["effect"], *(colors if len(colors) <= 2 else []),  # 7-8 would be too long
-                     *([f"{state['cycle_ms']} ms"] if "cycle_ms" in state else [])])
+                     *([f"{state['cycle_ms']} ms"] if "cycle_ms" in state else []),
+                     *([state["mode"], f"fade-out {state['fade_out']}"] if "mode" in state else []),
+                     *([f"on {', '.join(state['zone'])}"] if state.get("zone", ["all"]) != ["all"] else []),
+                     *(["(starts on a key press)"] if state.get("on_key") else []),
+                     *([f"(stops on a key {state['stop']})"] if state.get("stop", "never") != "never" else [])])
 
 
 def parse_color(text):
@@ -842,12 +906,49 @@ def fill_colors(effect, colors):
     return colors
 
 
-def set_lighting(p, effect, colors, brightness, cycle, direction=None):
-    """The profile with another effect (and colors, brightness, cycle, direction); everything
-    else as it was. Colors not given stay as the profile keeps them."""
+def zone_bits(text):
+    """A zone for --zone: all, or a comma list of numpad, fkeys, numbers, arrows, wasd, bars."""
+    names = [n.strip().lower() for n in text.split(",") if n.strip()]
+    if not names or any(n not in ZONES for n in names) or "all" in names and len(names) > 1:
+        raise Z20Error(f"zone: all, or some of {', '.join(n for n in ZONES if n != 'all')} (comma list)")
+    bits = 0
+    for n in names:
+        bits |= ZONES[n]
+    return bits
+
+
+def zone_names(bits):
+    return ["all"] if bits & ZONES["all"] else [n for n, b in ZONES.items() if n != "all" and bits & b]
+
+
+def fade_out_raw(s):
+    return 82 - s if s <= 50 else int((100 - s) / 1.56)
+
+
+def fade_out_slider(raw):
+    return max(0, 82 - raw) if raw >= 32 else int(100 - raw * 1.56)
+
+
+def set_lighting(p, effect, colors, brightness, cycle, direction=None, on_key=None, zone=None, stop=None,
+                 reactive_mode=None, fade_out=None):
+    """The profile with another effect (and colors, brightness, cycle, direction, whether it starts
+    on a key press, its zone bits, what stops it, reactive's mode and fade-out); everything else as
+    it was. Colors not given stay as the profile keeps them."""
     p = bytearray(p)
     p[P_EFFECT] = EFFECTS[effect]
     mode = EFFECTS[effect]
+    if mode in RAM_BLOCKS:
+        at = RAM_BLOCKS[mode][1]
+        if zone is not None:
+            p[at] = zone
+        if on_key is not None:  # the start mode: 0 as the profile loads, 1 on a key press
+            p[at + 1] = int(on_key)
+        if stop is not None:
+            p[at + 2] = STOPS[stop]
+    if mode == 7 and reactive_mode is not None:
+        p[EFFECT_SUB[7]] = REACTIVE_MODES[reactive_mode]
+    if mode == 7 and fade_out is not None:
+        p[P_TRIGGER_FADE_OUT:P_TRIGGER_FADE_OUT + 2] = fade_out_raw(fade_out).to_bytes(2, "little")
     if direction is not None:
         p[EFFECT_SUB[mode]] = DIRECTIONS[mode][direction]
     p[P_EFFECT + 1] = p[EFFECT_SUB[mode]] if mode in EFFECT_SUB else 0
@@ -859,33 +960,69 @@ def set_lighting(p, effect, colors, brightness, cycle, direction=None):
                 p[c + 1:c + 4] = colors[i]
             if brightness is not None:
                 p[c] = round(brightness * 255 / 100)
-    if mode == 6 and brightness is not None:
-        p[P_STARS_BRIGHTNESS] = round(brightness * 255 / 100)
+    if mode in OWN_BRIGHTNESS and brightness is not None:
+        p[OWN_BRIGHTNESS[mode]] = round(brightness * 255 / 100)
     if cycle is not None and mode in EFFECT_CYCLE:
         p[EFFECT_CYCLE[mode]:EFFECT_CYCLE[mode] + 2] = max(100, min(60000, cycle)).to_bytes(2, "little")
     return p
 
 
+def welcome_brightness_at(effect):
+    """The bytes of a welcome effect's brightness: raining's own, the others' colors' (all alike)."""
+    if effect == 19:
+        return [WELCOME_RAINING_BRIGHTNESS]
+    at, count = WELCOME_COLORS.get(effect, (0, 0))
+    return [at + 4 * i for i in range(count)]
+
+
+def welcome_effects(p):
+    """Explosion to thunder's own settings, by name as the welcome effect has it: colors, direction,
+    brightness (percent), as far as each has them."""
+    out = {}
+    for n in range(18, 23):
+        e = {}
+        if n in WELCOME_COLORS:
+            at, count = WELCOME_COLORS[n]
+            e["colors"] = [color_hex(p[at + 4 * i:at + 4 * i + 4]) for i in range(count)]
+        if n in WELCOME_DIRECTIONS:
+            at, ways = WELCOME_DIRECTIONS[n]
+            e["direction"] = {v: k for k, v in ways.items()}.get(p[at], str(p[at]))
+        e["brightness"] = round(p[welcome_brightness_at(n)[0]] * 100 / 255)
+        out[EFFECT_NAMES[n]] = e
+    return out
+
+
 def sensor_settings(p):
+    """The sensor's settings; welcome_effects: each welcome effect's own settings (welcome_effects())."""
     u16 = lambda o: p[P_SENSOR + o] | p[P_SENSOR + o + 1] << 8
     name = lambda table, value, extra: {v: k for k, v in table.items()}.get(value, extra.get(value, str(value)))
     return {"on": bool(p[P_SENSOR]), "distance_cm": u16(1) / 10,
             "come": name(COME, u16(5), {0: "turn on"}), "come_after_s": u16(3) / 1000,
             "leave": name(LEAVE, u16(9), {0: "turn off"}), "leave_after_s": u16(7),
-            "welcome": EFFECT_NAMES.get(p[P_SENSOR + 27], str(p[P_SENSOR + 27])), "welcome_ms": u16(29)}
+            "welcome": EFFECT_NAMES.get(p[P_SENSOR + 27], str(p[P_SENSOR + 27])), "welcome_ms": u16(29),
+            "welcome_effects": welcome_effects(p)}
 
 
 def sensor_text(s):
     if not s["on"]:
         return "presence sensor off"
     come = f"come: {s['come']}" + (f" after {s['come_after_s']:g} s" if s["come_after_s"] else "")
-    return (f"present within {s['distance_cm']:g} cm; {come}, welcome {s['welcome']} {s['welcome_ms']} ms; "
+    own = s.get("welcome_effects", {}).get(s["welcome"], {})
+    welcome = " ".join([s["welcome"], *own.get("colors", []), *([own["direction"]] if "direction" in own else []),
+                        *([f"{own['brightness']} %"] if "brightness" in own else []), f"{s['welcome_ms']} ms"])
+    return (f"present within {s['distance_cm']:g} cm; {come}, welcome {welcome}; "
             f"leave: {s['leave']} after {s['leave_after_s']} s")
 
 
 def set_sensor(p, words):
-    """The profile with one sensor setting changed: on | off | distance CM | come ACTION [S] |
-    leave ACTION [S] | welcome EFFECT [MS]."""
+    """The profile with sensor settings changed, one or several in a row: on | off | distance CM |
+    come ACTION [S] | leave ACTION [S] | welcome EFFECT [MS] [COLOR ...] [DIRECTION] [N%] (the
+    effect's own colors from the first on, its direction, its brightness in percent)."""
+    starts = [i for i, w in enumerate(words) if i == 0 or w in SENSOR_SETTINGS]
+    if len(starts) > 1:
+        for a, b in zip(starts, starts[1:] + [len(words)]):
+            p = set_sensor(p, words[a:b])
+        return p
     p = bytearray(p)
 
     def put(offset, value):
@@ -913,13 +1050,39 @@ def set_sensor(p, words):
         put(9, LEAVE[rest[0]])
         if rest[1:]:
             put(7, round(number(rest[1], 10, 999, "leave after, seconds")))
-    elif what == "welcome" and 1 <= len(rest) <= 2 and rest[0] in WELCOME:
-        p[P_SENSOR + 27:P_SENSOR + 29] = bytes([WELCOME[rest[0]], 0])
-        if rest[1:]:
-            put(29, round(number(rest[1], 500, 30000, "welcome length, ms")))
+    elif what == "welcome" and rest and rest[0] in WELCOME:
+        effect, more = WELCOME[rest[0]], rest[1:]
+        if more and re.fullmatch(r"\d+", more[0]) and len(more[0]) < 6:
+            put(29, round(number(more[0], 500, 30000, "welcome length, ms")))
+            more = more[1:]
+        colors = [w for w in more if re.fullmatch(r"#?[0-9a-fA-F]{6}", w)]
+        levels = [w for w in more if w.endswith("%") and w not in colors]
+        ways = [w for w in more if w not in colors and w not in levels]
+        at, count = WELCOME_COLORS.get(effect, (0, 0))
+        directions = WELCOME_DIRECTIONS.get(effect, (0, {}))
+        if len(colors) > count:
+            raise Z20Error(f"welcome {rest[0]}: " + (f"{count} colors at most" if count else
+                                                     "no colors of its own (fade and rows: the lighting's)"))
+        if len(ways) > 1 or ways and ways[0] not in directions[1]:
+            raise Z20Error(f"welcome {rest[0]}: " + (f"which way: {' or '.join(directions[1])}" if directions[1]
+                                                     else f"no direction, nor {' '.join(ways)}"))
+        if len(levels) > 1 or levels and effect not in range(18, 23):
+            raise Z20Error(f"welcome {rest[0]}: one brightness, for explosion to thunder (fade and rows: the "
+                           "lighting's)")
+        for i, color in enumerate(colors):
+            p[at + 4 * i + 1:at + 4 * i + 4] = parse_color(color)
+        if ways:
+            p[directions[0]] = directions[1][ways[0]]
+        if levels:
+            level = round(number(levels[0][:-1], 0, 100, "welcome brightness, percent") * 255 / 100)
+            for i in welcome_brightness_at(effect):
+                p[i] = level
+        # The sub mode: the effect's direction, as Unleash has it, else 0.
+        p[P_SENSOR + 27:P_SENSOR + 29] = bytes([effect, p[directions[0]] if directions[1] else 0])
     else:
         raise Z20Error("sensor: on | off | distance CM | come nothing|wake|unlock [S] | "
-                       "leave nothing|dark|lock|sleep [S] | welcome " + "|".join(WELCOME) + " [MS]")
+                       "leave nothing|dark|lock|sleep [S] | welcome " + "|".join(WELCOME) + " [MS] [COLOR ...] "
+                       "[in|out / left|right] [N%]; several in a row")
     return p
 
 
@@ -1019,9 +1182,9 @@ def presence_config(path=PRESENCE_CONFIG, text=None):
     light = cfg["away_light"]
     if light and not (len(light) > 1 and (light[0] == "light" and light[1] in EFFECTS
                                           or light[0] == "animate" and light[1] in ANIMATIONS)
-                      and not {"--live", "--save", "--profile"} & set(light)):
+                      and not {"--live", "--save", "--profile", "--on-key"} & set(light)):
         raise Z20Error(f"{path}: away light: not a lighting: {section['away light']} (light EFFECT ... or "
-                       f"animate EFFECT ..., as for z20, without --live or --save)")
+                       f"animate EFFECT ..., as for z20, without --live, --save or --on-key)")
     return cfg
 
 
@@ -1675,12 +1838,13 @@ def with_ram_lighting(kb, p, effect):
     return p
 
 
-def live_lighting(kb, effect, colors, brightness, cycle, direction=None):
-    """Change the active profile's lighting in RAM only: shown at once, gone on reload."""
+def live_lighting(kb, effect, colors, brightness, cycle, direction=None, **block):
+    """Change the active profile's lighting in RAM only: shown at once, gone on reload. block: as for
+    set_lighting (on_key, zone, stop, reactive_mode, fade_out)."""
     stored = kb.read_profile(kb.profile_number())
     mode = EFFECTS[effect]
     before = with_ram_lighting(kb, stored, mode)
-    after = set_lighting(before, effect, colors, brightness, cycle, direction)
+    after = set_lighting(before, effect, colors, brightness, cycle, direction, **block)
     if mode in RAM_BLOCKS:
         block, at, size = RAM_BLOCKS[mode]
         ram = bytearray(kb.read_ram(block))
@@ -2635,8 +2799,8 @@ def backlight():
 
 # Parts of a profile that "default" takes from the factory profile (offset, size): the effect
 # and the effects Unleash's own lighting reset copies (static to stars), and the sensor.
-FACTORY_LIGHTING = [(P_EFFECT, 2), (P_STATIC, P_FADE - P_STATIC)]
-FACTORY_SENSOR = [(P_SENSOR, 31)]
+FACTORY_LIGHTING = [(P_EFFECT, 2), (P_STATIC, P_WELCOME - P_STATIC)]  # to rows' end
+FACTORY_SENSOR = [(P_SENSOR, 31), (P_WELCOME, 144)]  # with the welcome effects' own colors
 
 
 def from_factory(p, factory, parts):
@@ -2890,8 +3054,19 @@ def main():
     parser.add_argument("--fn", action="store_true", help="key: its Fn layer")
     parser.add_argument("--brightness", type=int, choices=range(0, 101), metavar="P", help="percent")
     parser.add_argument("--cycle", type=int, metavar="MS", help="effect cycle in milliseconds")
-    parser.add_argument("--direction", choices=("up", "down", "left", "right", "cw", "ccw"),
-                        help="light wave / spiral: which way it runs")
+    parser.add_argument("--direction", choices=("up", "down", "left", "right", "cw", "ccw", "in", "out"),
+                        help="light wave / spiral / explosion / barber: which way it runs")
+    parser.add_argument("--on-key", action=argparse.BooleanOptionalAction,
+                        help="light: the effect starts on the first key press, dark until then (after plugging "
+                             "in, a reload, a welcome effect); --no-on-key: as the profile loads")
+    parser.add_argument("--zone", metavar="Z", help="light: the keys the effect runs on: all, or a comma list of "
+                                                     "numpad, fkeys, numbers, arrows, wasd, bars")
+    parser.add_argument("--stop", choices=tuple(STOPS), help="light: what stops the effect: never, a key press or its "
+                                                            "release")
+    parser.add_argument("--mode", choices=tuple(REACTIVE_MODES), help="light reactive: the typed key lights, one key, "
+                                                                     "or 3x3 around it")
+    parser.add_argument("--fade-out", type=int, choices=range(0, 101), metavar="N",
+                        help="light reactive: how fast a key goes dark again, 0-100 as in Unleash (0 the longest glow)")
     parser.add_argument("--live", action="store_true", help="light: in RAM only, until z20 light reload; "
                                                              "animate: for now, as the service")
     parser.add_argument("--save", action="store_true", help="animate: as the service, also after the next login")
@@ -2949,7 +3124,17 @@ def main():
             parser.error(f"light {v[0]}: " + (f"at most {most} color{'s' if most > 1 else ''}" if most
                                               else "takes no colors"))
         if args.direction and args.direction not in DIRECTIONS.get(EFFECTS[v[0]], {}):
-            parser.error("--direction: up, down, left or right for wave, cw or ccw for spiral")
+            parser.error("--direction: up, down, left or right for wave, cw or ccw for spiral, in or out for "
+                         "explosion, left or right for barber")
+        if (args.on_key is not None or args.zone or args.stop) and EFFECTS[v[0]] not in RAM_BLOCKS:
+            parser.error(f"--on-key, --zone, --stop: not for {v[0]}")
+        if (args.mode or args.fade_out is not None) and v[0] != "reactive":
+            parser.error("--mode and --fade-out are for reactive")
+        if args.zone:
+            try:
+                zone_bits(args.zone)
+            except Z20Error as e:
+                parser.error(f"--{e}")
     if args.command == "key":
         if not v:
             parser.error("key: which key (e1, capslock, f1, a ...), or all")
@@ -3201,10 +3386,12 @@ def main():
                 stored = lighting(p)
             elif v and v != ["reload"]:
                 colors = fill_colors(v[0], [parse_color(c) for c in v[1:]])
+                block = dict(on_key=args.on_key, zone=zone_bits(args.zone) if args.zone else None, stop=args.stop,
+                             reactive_mode=args.mode, fade_out=args.fade_out)
                 if args.live:
-                    p = live_lighting(kb, v[0], colors, args.brightness, args.cycle, args.direction)
+                    p = live_lighting(kb, v[0], colors, args.brightness, args.cycle, args.direction, **block)
                 else:
-                    p = set_lighting(p, v[0], colors, args.brightness, args.cycle, args.direction)
+                    p = set_lighting(p, v[0], colors, args.brightness, args.cycle, args.direction, **block)
                     kb.write_profile(n, p)
                     stored = lighting(p)
             elif n == active:  # what is shown: RAM, which --live may have changed

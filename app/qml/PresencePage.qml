@@ -1,14 +1,19 @@
 /*
  * The app's "Presence" page. First the keyboard's presence sensor: on or off
  * (in the active profile; off, neither the keyboard nor the service sees you),
- * what it sees now and the distance over the last two minutes. Then what
- * z20's presence service does when you leave the desk and come back (~/.config/z20/presence.ini, changed through `z20
- * presence set`): how long until you count as gone, locking the screen,
- * pausing media, the screens off, and the keyboard's lighting while you are
- * away (one of the lighting presets; the stored lighting comes back with
- * you). Below, what the keyboard itself does when you leave and when you
- * come (its welcome effect), stored in the active profile. Each change
- * applies at once; there is nothing to apply.
+ * what it sees now and the distance over the last two minutes. Then z20's
+ * presence service: whether it runs, and what it does when you leave the desk
+ * and come back (~/.config/z20/presence.ini, through `z20 presence set`): how
+ * long until you count as gone, locking the screen, pausing media, the
+ * screens off, and the keyboard's lighting while you are away (one of the
+ * lighting presets; the stored lighting comes back with you). Last, what the
+ * keyboard itself does when you leave and when you come (its welcome effect,
+ * with the effect's own colors), stored in the active profile.
+ *
+ * Changes wait for Save (Ctrl+S): the keyboard's then go in one profile write
+ * (`z20 sensor` with all of them), presence.ini's in one `z20 presence set`,
+ * which restarts the service once. Another page asks before it replaces
+ * this one with changes not saved (Main.qml).
  */
 
 import QtQuick
@@ -25,7 +30,6 @@ KCM.SimpleKCM {
 
     readonly property var settings: z20.presenceSettings
     readonly property var sensor: z20.sensor
-    readonly property bool sensorOn: wanted.sensorOn !== undefined ? wanted.sensorOn : !!sensor && sensor.on
     readonly property bool measured: !!sensor && sensor.on && sensor.distance_mm !== undefined
     // As the presence service goes by it: near, far or nothing in view (see Z20Data.seen).
     readonly property bool present: z20.seen === "near"
@@ -35,9 +39,6 @@ KCM.SimpleKCM {
     readonly property var presets: Presets.parse(z20.presetsText)
     // Each preset as presence.ini's "away light", in the same order.
     readonly property var lights: presets.map(p => Presets.awayLight(p))
-    readonly property string awayLight: settings ? settings.away_light || "" : ""
-    // The away light is set but none of the presets (it was changed since, or set by hand).
-    readonly property bool otherLight: awayLight !== "" && lights.indexOf(awayLight) < 0
 
     readonly property var leaveChoices: [
         { id: "lock", text: i18n("Lock the screen") },
@@ -50,30 +51,94 @@ KCM.SimpleKCM {
         { id: "lock", text: i18n("Lock the screen (Win+L)") },
         { id: "sleep", text: i18n("Sleep") }
     ]
-    // id as z20 sensor welcome takes it, name as z20 sensor --json reads it.
+    // As z20 sensor welcome takes them and z20 sensor --json reads them (a z20 from before 2026-11-19 read the
+    // barber pole and the light bar wave by their long names, the second).
     readonly property var welcomeChoices: [
-        { id: "fade", name: "fade", text: i18n("Fade") },
-        { id: "rows", name: "rows", text: i18n("Rows") },
-        { id: "explosion", name: "explosion", text: i18n("Explosion") },
-        { id: "raining", name: "raining", text: i18n("Raining") },
-        { id: "barber", name: "barber pole", text: i18n("Barber pole") },
-        { id: "lightbar", name: "light bar wave", text: i18n("Light bar wave") },
-        { id: "thunder", name: "thunder", text: i18n("Thunder") }
+        { id: "fade", text: i18n("Fade") },
+        { id: "rows", text: i18n("Rows") },
+        { id: "explosion", text: i18n("Explosion") },
+        { id: "raining", text: i18n("Raining") },
+        { id: "barber", old: "barber pole", text: i18n("Barber pole") },
+        { id: "lightbar", old: "light bar wave", text: i18n("Light bar wave") },
+        { id: "thunder", text: i18n("Thunder") }
     ]
 
-    // What was just set here ({leave, come, sensorOn, keyboardLeave, keyboardAfter, welcome, welcomeMs}) until a
-    // read has it (z20.settled), so a second change right after the first builds on it.
-    property var wanted: ({})
-    readonly property var leaveList: wanted.leave || (settings ? settings.leave : [])
-    readonly property var comeList: wanted.come || (settings ? settings.come : [])
-    readonly property string keyboardLeave: wanted.keyboardLeave || (sensor ? sensor.leave : "")
-    readonly property int keyboardAfter: wanted.keyboardAfter || (sensor ? sensor.leave_after_s : 10)
-    readonly property string welcome: wanted.welcome
-        || (sensor ? (welcomeChoices.find(c => c.name === sensor.welcome) || { id: "" }).id : "")
-    readonly property int welcomeMs: wanted.welcomeMs || (sensor ? sensor.welcome_ms : 5000)
+    // As stored: what the page shows without changes.
+    readonly property var saved: ({
+        sensorOn: !!sensor && sensor.on,
+        distance: sensor ? Math.round(sensor.distance_cm) : 50,
+        serviceDistance: settings && settings.distance_cm ? settings.distance_cm : 0,
+        serviceOn: z20.presenceActive,
+        leaveAfter: settings ? Math.round(settings.leave_after_s) : 30,
+        leave: settings ? settings.leave : [],
+        come: settings ? settings.come : [],
+        awayLight: settings ? settings.away_light || "" : "",
+        keyboardLeave: sensor ? sensor.leave : "",
+        keyboardAfter: sensor ? sensor.leave_after_s : 10,
+        welcome: sensor ? (welcomeChoices.find(c => c.id === sensor.welcome || c.old === sensor.welcome)
+                           || { id: "" }).id : "",
+        welcomeMs: sensor ? sensor.welcome_ms : 5000
+    })
+    // The changes not saved yet, by those keys (and the welcome effect's own: welcomeColors, welcomeDirection,
+    // welcomeBrightness), and what Save sent, until a read has it (z20.settled): a change right after Save
+    // builds on it.
+    property var draft: ({})
+    property var sent: ({})
+    readonly property var ownKeys: ({ welcomeColors: true, welcomeDirection: true, welcomeBrightness: true })
+    readonly property bool dirty: Object.keys(draft).length > 0
 
-    function want(changes) {
-        wanted = Object.assign({}, wanted, changes);
+    readonly property bool sensorOn: value("sensorOn")
+    // Present: closer than the keyboard's distance (cm), which the service goes by too, unless presence.ini has
+    // one of its own (serviceDistance, 0: none).
+    readonly property int distance: value("distance")
+    readonly property real serviceDistance: value("serviceDistance")
+    readonly property real withinMm: (serviceDistance || distance) * 10
+    readonly property bool serviceOn: value("serviceOn")
+    readonly property int leaveAfter: value("leaveAfter")
+    readonly property var leaveList: value("leave")
+    readonly property var comeList: value("come")
+    readonly property string awayLight: value("awayLight")
+    // The away light is set but none of the presets (it was changed since, or set by hand).
+    readonly property bool otherLight: awayLight !== "" && lights.indexOf(awayLight) < 0
+    readonly property string keyboardLeave: value("keyboardLeave")
+    readonly property int keyboardAfter: value("keyboardAfter")
+    readonly property string welcome: value("welcome")
+    readonly property int welcomeMs: value("welcomeMs")
+    // The welcome effect's own colors (rrggbb; none for fade, rows and raining).
+    // The welcome effect's own settings, as z20 sensor --json has them (welcome_effects): colors (rrggbb; none for
+    // fade, rows and raining), direction (explosion: out, in; barber pole: left, right) and brightness (percent;
+    // not for fade and rows, which have the lighting's).
+    readonly property var welcomeColors: own("welcomeColors")
+    readonly property string welcomeDirection: own("welcomeDirection")
+    readonly property int welcomeBrightness: own("welcomeBrightness")
+    readonly property var welcomeWays: ({ explosion: [["out", i18n("Outward")], ["in", i18n("Inward")]],
+                                          barber: [["left", i18n("Left")], ["right", i18n("Right")]] })[welcome] || []
+
+    function value(key) {
+        return key in draft ? draft[key] : key in sent ? sent[key] : saved[key];
+    }
+
+    // One of the welcome effect's own settings: as changed, as sent, else as stored for that effect.
+    function own(key) {
+        return key in draft ? draft[key] : key in sent && sent.welcome === welcome ? sent[key] : stored(welcome, key);
+    }
+
+    function stored(id, key) {
+        const e = sensor && sensor.welcome_effects ? sensor.welcome_effects[id] || {} : {};
+        return key === "welcomeColors" ? (e.colors || []).map(c => c.replace("#", ""))
+            : key === "welcomeDirection" ? e.direction || "" : e.brightness !== undefined ? e.brightness : -1;
+    }
+
+    // A change, kept until Save; back to what is stored, it is none.
+    function change(key, v) {
+        const d = Object.assign({}, draft);
+        const before = key in ownKeys ? stored(welcome, key) : key in sent ? sent[key] : saved[key];
+        if (JSON.stringify(v) === JSON.stringify(before)) {
+            delete d[key];
+        } else {
+            d[key] = v;
+        }
+        draft = d;
     }
 
     function leaves(id) {
@@ -87,32 +152,66 @@ KCM.SimpleKCM {
     // One action on or off when you leave; the others keep their delays. Pausing media goes with resuming it,
     // the screens off with waking them.
     function setLeave(id, on) {
-        const leave = leaveList.filter(a => a.action !== id).concat(on ? [{ action: id, after_s: 0 }] : []);
-        const changes = ["leave", actionList(leave)];
-        let come = comeList;
+        change("leave", leaveList.filter(a => a.action !== id).concat(on ? [{ action: id, after_s: 0 }] : []));
         const back = { "pause-media": "resume-media", "screen-off": "wake" }[id];
         const has = !!back && comeList.some(a => a.action === back);
         if (back && on !== has && (on || back === "resume-media")) {
-            come = comeList.filter(a => a.action !== back).concat(on ? [{ action: back, after_s: 0 }] : []);
-            changes.push("come", actionList(come));
+            change("come", comeList.filter(a => a.action !== back).concat(on ? [{ action: back, after_s: 0 }] : []));
         }
-        z20.setPresence(changes);
-        want({ leave: leave, come: come });
     }
 
-    function setSensorOn(on) {
-        z20.setSensorOn(on);
-        want({ sensorOn: on });
+    // Another welcome effect, with its own colors as stored.
+    function setWelcome(id) {
+        const d = Object.assign({}, draft);
+        Object.keys(ownKeys).forEach(k => delete d[k]);
+        draft = d;
+        change("welcome", id);
     }
 
-    function setKeyboardLeave(action, seconds) {
-        z20.setSensorLeave(action, seconds);
-        want({ keyboardLeave: action, keyboardAfter: seconds });
-    }
-
-    function setWelcome(effect, ms) {
-        z20.setSensorWelcome(effect, ms);
-        want({ welcome: effect, welcomeMs: ms });
+    function save() {
+        const d = draft;
+        const words = [];
+        if ("sensorOn" in d) {
+            words.push(d.sensorOn ? "on" : "off");
+        }
+        if ("distance" in d) {
+            words.push("distance", distance);
+        }
+        if (("keyboardLeave" in d || "keyboardAfter" in d) && keyboardChoices.some(c => c.id === keyboardLeave)) {
+            words.push("leave", keyboardLeave, keyboardAfter);
+        }
+        if (["welcome", "welcomeMs"].concat(Object.keys(ownKeys)).some(k => k in d) && welcome !== "") {
+            words.push("welcome", welcome, welcomeMs, ...("welcomeColors" in d ? d.welcomeColors : []),
+                       ...("welcomeDirection" in d ? [d.welcomeDirection] : []),
+                       ...("welcomeBrightness" in d ? [d.welcomeBrightness + "%"] : []));
+        }
+        if (words.length) {
+            z20.setSensor(words);
+        }
+        const changes = [];
+        if ("leaveAfter" in d) {
+            changes.push("leave after", leaveAfter);
+        }
+        if ("leave" in d) {
+            changes.push("leave", actionList(leaveList));
+        }
+        if ("come" in d) {
+            changes.push("come", actionList(comeList));
+        }
+        if ("awayLight" in d) {
+            changes.push("away light", awayLight);
+        }
+        if ("serviceDistance" in d) {
+            changes.push("distance", serviceDistance ? String(serviceDistance) : "");
+        }
+        if (changes.length) {
+            z20.setPresence(changes);
+        }
+        if ("serviceOn" in d) {
+            z20.setPresenceService(d.serviceOn);
+        }
+        sent = Object.assign({}, sent, d);
+        draft = ({});
     }
 
     Lib.Z20Data {
@@ -120,32 +219,53 @@ KCM.SimpleKCM {
         fast: true
         readSensor: true
         watchSensor: true
-        onSettled: page.wanted = ({})
+        onSettled: page.sent = ({})
     }
 
-    // Spin boxes send their value once it has stood still a moment, not at every step.
-    Timer {
-        id: awayAfter
-        interval: 1000
-        onTriggered: {
-            z20.setPresence(["leave after", awayAfterBox.value]);
-            awayAfterBox.value = Qt.binding(() => page.settings ? Math.round(page.settings.leave_after_s) : 30);
+    // The welcome effect's colors: the desktop's, the effect's, or any other.
+    ColorPicker {
+        id: picker
+
+        property int slot: 0
+
+        used: page.welcomeColors.filter((c, i, all) => all.indexOf(c) === i)
+        onPicked: color => {
+            const colors = page.welcomeColors.slice();
+            colors[slot] = color;
+            page.change("welcomeColors", colors);
         }
     }
-    Timer {
-        id: keyboardAfter
-        interval: 1000
-        onTriggered: {
-            page.setKeyboardLeave(page.keyboardLeave, keyboardAfterBox.value);
-            keyboardAfterBox.value = Qt.binding(() => page.keyboardAfter);
-        }
+
+    Shortcut {
+        sequences: [StandardKey.Save]
+        enabled: page.dirty
+        onActivated: page.save()
     }
-    Timer {
-        id: welcomeLength
-        interval: 1000
-        onTriggered: {
-            page.setWelcome(page.welcome, welcomeLengthBox.value);
-            welcomeLengthBox.value = Qt.binding(() => page.welcomeMs);
+
+    footer: QQC2.ToolBar {
+        position: QQC2.ToolBar.Footer
+
+        contentItem: RowLayout {
+            QQC2.Label {
+                text: z20.commandError || (page.dirty ? i18n("Not saved yet") : "")
+                color: z20.commandError ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+                Layout.leftMargin: Kirigami.Units.smallSpacing
+            }
+            QQC2.Button {
+                icon.name: "edit-undo"
+                text: i18n("Discard Changes")
+                enabled: page.dirty
+                onClicked: page.draft = ({})
+            }
+            QQC2.Button {
+                id: saveButton
+                icon.name: "document-save"
+                text: i18n("Save")
+                enabled: page.dirty
+                onClicked: page.save()
+            }
         }
     }
 
@@ -162,13 +282,40 @@ KCM.SimpleKCM {
             enabled: !!page.sensor
             checked: page.sensorOn
             onToggled: {
-                page.setSensorOn(checked);
+                page.change("sensorOn", checked);
                 checked = Qt.binding(() => page.sensorOn);
             }
         }
         QQC2.Label {
             text: i18n("Stored in the active profile (%1). Off, the keyboard does nothing when you come and go, and "
                        + "the presence service below can't see you either.", z20.profile)
+            font: Kirigami.Theme.smallFont
+            wrapMode: Text.Wrap
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Present within:")
+
+            QQC2.SpinBox {
+                id: distanceBox
+                enabled: !!page.sensor
+                from: 10
+                to: 120
+                value: page.distance
+                onValueModified: {
+                    page.change("distance", value);
+                    value = Qt.binding(() => page.distance);
+                }
+            }
+            QQC2.Label {
+                text: i18n("cm")
+            }
+        }
+        QQC2.Label {
+            text: i18n("Closer than this counts as at the desk; farther away, as away. The keyboard goes by it, and "
+                       + "so does the presence service. Between where you sit and where the empty chair stands: the "
+                       + "graph below shows both.")
             font: Kirigami.Theme.smallFont
             wrapMode: Text.Wrap
             Layout.maximumWidth: Kirigami.Units.gridUnit * 24
@@ -199,7 +346,8 @@ KCM.SimpleKCM {
         Canvas {
             id: graph
 
-            readonly property real topMm: Math.max(z20.presentWithinMm * 2, 1000)  // the distance at the top edge
+            readonly property real topMm: Math.max(page.withinMm * 2, 1000)  // the distance at the top edge
+            onTopMmChanged: requestPaint()
             readonly property color lineColor: Kirigami.Theme.textColor
             readonly property color goodColor: Kirigami.Theme.positiveTextColor
             readonly property color awayColor: Kirigami.Theme.neutralTextColor
@@ -215,7 +363,7 @@ KCM.SimpleKCM {
             onPaint: {
                 const ctx = getContext("2d");
                 ctx.reset();
-                const band = yOf(z20.presentWithinMm);
+                const band = yOf(page.withinMm);
                 ctx.fillStyle = Qt.rgba(goodColor.r, goodColor.g, goodColor.b, 0.12);
                 ctx.fillRect(0, band, width, height - band);
                 ctx.strokeStyle = Qt.rgba(goodColor.r, goodColor.g, goodColor.b, 0.6);
@@ -258,9 +406,9 @@ KCM.SimpleKCM {
             QQC2.Label {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                anchors.bottomMargin: Math.min(parent.height - parent.yOf(z20.presentWithinMm) + 1,
+                anchors.bottomMargin: Math.min(parent.height - parent.yOf(page.withinMm) + 1,
                                                parent.height - height)
-                text: i18n("%1 cm", Math.round(z20.presentWithinMm / 10))
+                text: i18n("%1 cm", Math.round(page.withinMm / 10))
                 color: Kirigami.Theme.positiveTextColor
                 font: Kirigami.Theme.smallFont
             }
@@ -287,11 +435,12 @@ KCM.SimpleKCM {
 
         QQC2.Switch {
             Kirigami.FormData.label: i18n("Presence service:")
-            text: z20.presenceActive ? i18n("On") : i18n("Off")
-            checked: z20.presenceActive
+            id: serviceSwitch
+            text: page.serviceOn ? i18n("On") : i18n("Off")
+            checked: page.serviceOn
             onToggled: {
-                z20.setPresenceService(checked);
-                checked = Qt.binding(() => z20.presenceActive);
+                page.change("serviceOn", checked);
+                checked = Qt.binding(() => page.serviceOn);
             }
         }
         QQC2.Label {
@@ -302,7 +451,21 @@ KCM.SimpleKCM {
             Layout.maximumWidth: Kirigami.Units.gridUnit * 24
         }
         Kirigami.InlineMessage {
-            visible: z20.presenceActive && !!page.sensor && !page.sensorOn
+            id: ownDistance
+            visible: page.serviceDistance > 0
+            type: Kirigami.MessageType.Information
+            text: i18n("The service goes by a distance of its own, %1 cm (presence.ini), not the keyboard's.",
+                       page.serviceDistance)
+            actions: [
+                Kirigami.Action {
+                    text: i18n("Use the Keyboard's")
+                    onTriggered: page.change("serviceDistance", 0)
+                }
+            ]
+            Layout.fillWidth: true
+        }
+        Kirigami.InlineMessage {
+            visible: page.serviceOn && !!page.sensor && !page.sensorOn
             type: Kirigami.MessageType.Warning
             text: i18n("The keyboard's sensor is off: the service can't see whether you are there.")
             Layout.fillWidth: true
@@ -316,8 +479,11 @@ KCM.SimpleKCM {
                 enabled: !!page.settings
                 from: 1
                 to: 3600
-                value: page.settings ? Math.round(page.settings.leave_after_s) : 30
-                onValueModified: awayAfter.restart()
+                value: page.leaveAfter
+                onValueModified: {
+                    page.change("leaveAfter", value);
+                    value = Qt.binding(() => page.leaveAfter);
+                }
             }
             QQC2.Label {
                 text: i18n("seconds away")
@@ -351,10 +517,8 @@ KCM.SimpleKCM {
             currentIndex: !page.settings ? -1 : page.awayLight === "" ? 0
                 : page.otherLight ? page.presets.length + 1 : page.lights.indexOf(page.awayLight) + 1
             onActivated: index => {
-                const light = index === 0 ? "" : index <= page.presets.length ? page.lights[index - 1] : page.awayLight;
-                if (light !== page.awayLight) {
-                    z20.setPresence(["away light", light]);
-                }
+                page.change("awayLight", index === 0 ? "" : index <= page.presets.length ? page.lights[index - 1]
+                                                                                          : page.awayLight);
                 currentIndex = Qt.binding(() => !page.settings ? -1 : page.awayLight === "" ? 0
                     : page.otherLight ? page.presets.length + 1 : page.lights.indexOf(page.awayLight) + 1);
             }
@@ -404,7 +568,7 @@ KCM.SimpleKCM {
             model: page.keyboardChoices.map(c => c.text)
             currentIndex: page.keyboardChoices.findIndex(c => c.id === page.keyboardLeave)
             onActivated: index => {
-                page.setKeyboardLeave(page.keyboardChoices[index].id, page.keyboardAfter);
+                page.change("keyboardLeave", page.keyboardChoices[index].id);
                 currentIndex = Qt.binding(() => page.keyboardChoices.findIndex(c => c.id === page.keyboardLeave));
             }
         }
@@ -417,7 +581,10 @@ KCM.SimpleKCM {
                 from: 10
                 to: 999
                 value: page.keyboardAfter
-                onValueModified: keyboardAfter.restart()
+                onValueModified: {
+                    page.change("keyboardAfter", value);
+                    value = Qt.binding(() => page.keyboardAfter);
+                }
             }
             QQC2.Label {
                 text: i18n("seconds away")
@@ -439,7 +606,7 @@ KCM.SimpleKCM {
             model: page.welcomeChoices.map(c => c.text)
             currentIndex: page.welcomeChoices.findIndex(c => c.id === page.welcome)
             onActivated: index => {
-                page.setWelcome(page.welcomeChoices[index].id, page.welcomeMs);
+                page.setWelcome(page.welcomeChoices[index].id);
                 currentIndex = Qt.binding(() => page.welcomeChoices.findIndex(c => c.id === page.welcome));
             }
         }
@@ -453,16 +620,94 @@ KCM.SimpleKCM {
                 to: 30000
                 stepSize: 500
                 value: page.welcomeMs
-                onValueModified: welcomeLength.restart()
+                onValueModified: {
+                    page.change("welcomeMs", value);
+                    value = Qt.binding(() => page.welcomeMs);
+                }
             }
             QQC2.Label {
                 text: i18nc("milliseconds", "ms")
             }
         }
+        RowLayout {
+            Kirigami.FormData.label: i18n("Colors:")
+            visible: page.welcomeColors.length > 0
+
+            // As many as the effect with the most has, shown as far as this one has colors: a swatch the
+            // Repeater took away while switching effects could still be measured by the next layout pass (a
+            // crash, offscreen and in the app alike).
+            Repeater {
+                model: 7
+
+                Rectangle {
+                    visible: index < page.welcomeColors.length
+                    implicitWidth: Kirigami.Units.iconSizes.medium
+                    implicitHeight: implicitWidth
+                    radius: width / 4
+                    color: "#" + (page.welcomeColors[index] || "000000")
+                    border.width: 1
+                    border.color: Kirigami.Theme.disabledTextColor
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            picker.slot = index;
+                            picker.openAt(parent, page.welcomeColors[index]);
+                        }
+                    }
+                }
+            }
+        }
+        QQC2.ComboBox {
+            id: welcomeWay
+            Kirigami.FormData.label: i18n("Direction:")
+            visible: page.welcomeWays.length > 0
+            model: page.welcomeWays.map(w => w[1])
+            currentIndex: page.welcomeWays.findIndex(w => w[0] === page.welcomeDirection)
+            onActivated: index => {
+                page.change("welcomeDirection", page.welcomeWays[index][0]);
+                currentIndex = Qt.binding(() => page.welcomeWays.findIndex(w => w[0] === page.welcomeDirection));
+            }
+        }
+        RowLayout {
+            Kirigami.FormData.label: i18n("Brightness:")
+            visible: page.welcomeBrightness >= 0
+
+            QQC2.Slider {
+                id: welcomeLevel
+                from: 0
+                to: 100
+                stepSize: 1
+                value: Math.max(0, page.welcomeBrightness)
+                onMoved: {
+                    page.change("welcomeBrightness", value);
+                    value = Qt.binding(() => Math.max(0, page.welcomeBrightness));
+                }
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+            }
+            QQC2.Label {
+                text: i18n("%1 %", Math.round(welcomeLevel.value))
+            }
+        }
+        Kirigami.InlineMessage {
+            visible: page.welcome === "explosion"
+            type: Kirigami.MessageType.Information
+            text: i18n("Explosion follows the distance the sensor measures, not a clock: it stands still while you "
+                       + "sit still, and its rings move, in jumps, as you come nearer or move away.")
+            Layout.fillWidth: true
+        }
+        QQC2.Label {
+            visible: page.welcome === "fade" || page.welcome === "rows"
+            text: i18n("Its colors are those of the lighting effect of the same name.")
+            font: Kirigami.Theme.smallFont
+            wrapMode: Text.Wrap
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+        }
         QQC2.Label {
             text: i18n("A lighting effect when the sensor sees you come to the desk; also when the keyboard is "
                        + "plugged in or the computer starts with you at the desk, as the sensor then sees you for "
-                       + "the first time.")
+                       + "the first time. Colors that differ from the lighting stand out.")
             font: Kirigami.Theme.smallFont
             wrapMode: Text.Wrap
             Layout.maximumWidth: Kirigami.Units.gridUnit * 24

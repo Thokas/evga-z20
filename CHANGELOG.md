@@ -9,14 +9,55 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - The settings app's Presence page switches the keyboard's presence sensor
-  on and off, shows what it sees and the distance over the last two
-  minutes (before in the Plasma widget), and sets the keyboard's welcome
-  effect and its length. It is in parts: the sensor, what z20's presence
-  service does on the computer, and what the keyboard itself does.
+  on and off, sets the distance that counts as present (the keyboard's,
+  which the presence service goes by too; where presence.ini has one of
+  its own, it says so and can drop it), shows what the sensor sees and the
+  distance over the last two minutes (before in the Plasma widget), and
+  sets the keyboard's welcome
+  effect, its length and its colors. It is in parts: the sensor, what
+  z20's presence service does on the computer, and what the keyboard
+  itself does. Its changes wait for Save (or Ctrl+S); switching pages or
+  closing the window with changes not saved asks first, on the Macros page
+  as well.
+- `z20 sensor welcome EFFECT [MS] [COLOR ...]`: the welcome effects'
+  own colors (explosion, barber pole, light bar wave, thunder; in
+  `z20 sensor --json` as `welcome_colors`), which were red from the factory
+  and hardly stood out from a red lighting. `z20 sensor default` resets
+  them too.
+- `z20 sensor` takes several settings in a row, written at once
+  (`z20 sensor off leave dark 30`).
+- What Unleash sets for an effect besides its colors: `z20 light ... --zone`
+  (the keys it runs on: all, or some of numpad, fkeys, numbers, arrows,
+  wasd, bars), `--stop never|press|release`, and for reactive `--mode
+  typed|one-key|3x3` and `--fade-out 0-100` (as Unleash's slider); in
+  `z20 light --json` and `z20 status --json`, in a lighting preset and on
+  the Lighting page ("Keys", "Stops", "Lights", "Fade out").
+- The presence sensor's effects as the lighting, as Unleash offers them:
+  `z20 light explosion|raining|barber|lightbar|thunder` with their colors,
+  direction and brightness (shared with the welcome effect of the same
+  name), zone, start and stop; on the Lighting page as effects of a preset,
+  drawn after how they may look. `z20 sensor --json` names the barber pole
+  and the light bar wave `barber` and `lightbar` now, as `z20 sensor
+  welcome` takes them.
+- The welcome effects' direction (explosion in or out, the barber pole left
+  or right) and brightness: `z20 sensor welcome explosion in 60%`, on the
+  Presence page, and in `z20 sensor --json` with their colors as
+  `welcome_effects`. Explosion has 7 colors, as in Unleash.
+- `z20 light ... --on-key` / `--no-on-key`: whether the keyboard's effect
+  starts on the first key press, dark until then (also after plugging in,
+  a reload or a welcome effect), or as the profile loads; `on_key` in
+  `z20 light --json` and `z20 status --json`. A lighting preset has it too
+  (the Lighting page: "Starts: On the first key press") and says it either
+  way when applied; the presence service's away light never waits for a
+  key.
 - The presence service says what it sees (at the desk or away, since
   when, nothing in view, the keyboard's sensor off) in
   `$XDG_RUNTIME_DIR/z20-presence.json`, and `z20 status` passes it on
   (`presence`), for the Plasma widget.
+
+### Fixed
+
+- `z20 light default` also resets fade's and rows' colors.
 
 ### Changed
 

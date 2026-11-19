@@ -11,7 +11,10 @@ function stored(preset, extra = {}) {
     return {
         lighting: software ? { effect: "wave", colors: [], brightness: 100 } : {
             effect: preset.effect, colors: P.filled(preset.effect, colors).map(c => "#" + c),
-            brightness: preset.brightness, cycle_ms: preset.cycle, direction: preset.direction },
+            brightness: preset.brightness, cycle_ms: preset.cycle, direction: preset.direction,
+            ...(preset.effect === "off" ? {} : { on_key: !!preset.onKey, zone: (preset.zone || "all").split(","),
+                                                 stop: preset.stop || "never" }),
+            ...(preset.effect === "reactive" ? { mode: preset.mode || "typed", fade_out: preset.fadeOut ?? 50 } : {}) },
         saved_animation: software ? { effect: preset.effect, colors, cycle_ms: preset.cycle,
                                       brightness: preset.brightness } : null,
         key_colors: preset.keys || {},
@@ -33,7 +36,8 @@ test("a keyboard effect stops the software one, then lights, then sets the keys'
     const gaming = byName("Gaming");
     assert.deepEqual(P.commands(gaming, true), [
         ["animate", "off", "--live"],
-        ["light", "static", "180030", "--brightness", "100", "--live"],
+        ["light", "static", "180030", "--brightness", "100", "--zone", "all", "--stop", "never", "--no-on-key",
+         "--live"],
         ["color", "all", "none", "W,A,S,D", "ff3000", "Up,Down,Left,Right", "00b0ff", "Esc", "ff0000", "--live"],
     ]);
     assert.deepEqual(P.commands(gaming, false)[0], ["animate", "off"]);
@@ -51,9 +55,40 @@ test("a software effect runs as the service: saved, or for now", () => {
 test("only the settings an effect has go out", () => {
     const [, light] = P.commands({ name: "x", effect: "static", colors: ["111111", "222222"], cycle: 900,
                                    direction: "left", brightness: 40 }, false);
-    assert.deepEqual(light, ["light", "static", "111111", "--brightness", "40"]);
+    assert.deepEqual(light, ["light", "static", "111111", "--brightness", "40", "--zone", "all", "--stop", "never",
+                             "--no-on-key"]);
     const [, off] = P.commands({ name: "x", effect: "off", colors: [], brightness: 40 }, false);
     assert.deepEqual(off, ["light", "off"]);
+});
+
+test("a preset starts on a key press or as the profile loads, said either way", () => {
+    const wave = { ...byName("Rainbow"), onKey: true };
+    assert.equal(P.commands(wave, false)[1].at(-1), "--on-key");
+    assert.equal(P.commands(wave, true)[1].at(-2), "--on-key");
+    assert.ok(P.matches(wave, stored(wave)));
+    assert.ok(!P.matches(byName("Rainbow"), stored(wave)), "the keyboard waits for a key, the preset doesn't");
+    assert.ok(P.matches(byName("Rainbow"), { ...stored(byName("Rainbow")), lighting: {
+        ...stored(byName("Rainbow")).lighting, on_key: undefined } }), "a z20 from before 2026-11-19");
+    assert.equal(P.awayLight(wave), P.awayLight(byName("Rainbow")), "away, nobody presses a key");
+    assert.equal(P.fromKeyboard(stored(wave), "x").onKey, true);
+    assert.equal(P.fromKeyboard(stored(byName("Rainbow")), "x").onKey, undefined);
+});
+
+test("zone, stop, and reactive's mode and fade-out: said either way, compared, kept from the keyboard", () => {
+    const typing = { ...byName("Typing"), zone: "arrows,wasd", stop: "release", mode: "3x3", fadeOut: 20 };
+    assert.deepEqual(P.commands(typing, false)[1].slice(-9), ["--zone", "arrows,wasd", "--stop", "release", "--mode",
+                                                             "3x3", "--fade-out", "20", "--no-on-key"]);
+    assert.deepEqual(P.commands(byName("Typing"), false)[1].slice(-9), ["--zone", "all", "--stop", "never", "--mode",
+                                                                        "typed", "--fade-out", "50", "--no-on-key"]);
+    assert.ok(P.matches(typing, stored(typing)));
+    assert.ok(!P.matches(byName("Typing"), stored(typing)));
+    assert.ok(P.matches({ ...typing, fadeOut: 52 }, stored({ ...typing, fadeOut: 53 })), "the same stored value");
+    assert.equal(P.awayLight(byName("Typing")), P.awayLight({ ...byName("Typing"), mode: "typed", fadeOut: 50 }));
+    assert.match(P.awayLight(typing), /--zone arrows,wasd --stop release --mode 3x3 --fade-out 20$/);
+    const own = P.fromKeyboard(stored(typing), "x");
+    assert.deepEqual([own.zone, own.stop, own.mode, own.fadeOut], ["arrows,wasd", "release", "3x3", 20]);
+    const plain = P.fromKeyboard(stored(byName("Typing")), "x");
+    assert.deepEqual([plain.zone, plain.stop, plain.mode, plain.fadeOut], [undefined, undefined, undefined, undefined]);
 });
 
 test("the away light is the lighting alone, without --live", () => {
@@ -106,7 +141,9 @@ test("the keyboard's lighting as a preset, which it then is", () => {
     const anim = P.fromKeyboard({ lighting: { effect: "static" }, saved_animation: { effect: "gradient",
                                   colors: ["ff0080"], cycle_ms: null, brightness: null }, key_colors: {} }, "x");
     assert.deepEqual(anim, { name: "x", effect: "gradient", colors: ["ff0080"], brightness: 100 });
-    assert.equal(P.fromKeyboard({ lighting: { effect: "thunder" }, saved_animation: null }, "x"), null);
+    assert.equal(P.fromKeyboard({ lighting: { effect: "recorded" }, saved_animation: null }, "x"), null);
+    assert.equal(P.fromKeyboard({ lighting: { effect: "thunder", colors: ["#0000ff"] }, saved_animation: null }, "x")
+        .effect, "thunder", "the presence sensor's effects are lighting too");
 });
 
 test("the stored list, else the defaults", () => {

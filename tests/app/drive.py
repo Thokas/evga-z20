@@ -109,6 +109,23 @@ SCENARIOS = {
         (10, lambda: page("change('name', 'Ocean 2')")),
         (1500, lambda: note(state_renamed=state(), names=[p["name"] for p in presets() or []])),
     ],
+    "on-key": lambda: [
+        (3500, lambda: page("current = presets.findIndex(p => p.name === 'Ocean')")),
+        (300, lambda: page("onKey.toggle(); onKey.toggled()")),
+        (300, lambda: note(shown=page("onKey.visible"), checked=page("onKey.checked"))),
+        (10, lambda: page("z20.applyPreset(preset, false)")),
+        (1500, lambda: note(log=log(), presets=presets())),
+    ],
+    # Reactive with what Unleash sets for it too: some keys, stopped when let go, 3x3 around, a longer glow.
+    "unleash": lambda: [
+        (3500, lambda: page("current = presets.findIndex(p => p.name === 'Typing')")),
+        (300, lambda: page("setZone('wasd', true); setZone('arrows', true)")),
+        (100, lambda: page("stopBox.activated(2); modeBox.activated(2); fadeOut.value = 20; fadeOut.moved()")),
+        (300, lambda: note(shown=[page("stopBox.visible"), page("modeBox.visible"), page("allKeys.visible")],
+                           all_keys=page("allKeys.checked"))),
+        (10, lambda: page("z20.applyPreset(preset, false)")),
+        (1500, lambda: note(log=log(), presets=presets())),
+    ],
     "keys": lambda: [
         (3500, lambda: page("current = presets.findIndex(p => p.name === 'Rainbow'); keyboard.select(['W', 'A'], true)")),
         (300, lambda: page("setKeys(keyboard.selected, 'ff0000'); showLive.checked = true; liveLater.restart()")),
@@ -116,18 +133,53 @@ SCENARIOS = {
                             keys=next((p.get("keys") for p in presets() or [] if p["name"] == "Rainbow"), None),
                             log=log())),
     ],
-    # The keyboard's own settings on the presence page: as read, then a welcome effect and its length set.
+    # The keyboard's own settings on the presence page: as read, then another welcome effect, its length and
+    # colors, sent on Save.
     "welcome": lambda: [
-        (3500, lambda: note(shown=page("welcomeBox.currentText"), length=page("welcomeLengthBox.value"))),
-        (10, lambda: page("welcomeBox.activated(welcomeChoices.findIndex(c => c.id === 'barber'))")),
+        (3500, lambda: note(shown=page("welcomeBox.currentText"), length=page("welcomeLengthBox.value"),
+                            colors=json.loads(page("JSON.stringify(welcomeColors)")))),
+        (10, lambda: page("welcomeBox.activated(welcomeChoices.findIndex(c => c.id === 'thunder'))")),
         (10, lambda: page("welcomeLengthBox.value = 3000; welcomeLengthBox.valueModified()")),
-        (2000, lambda: note(log=log(), chosen=page("welcomeBox.currentText"))),
+        (10, lambda: page("picker.slot = 0; picker.picked('0000ff')")),
+        (10, lambda: page("welcomeLevel.value = 60; welcomeLevel.moved()")),
+        (1000, lambda: note(unsaved=log(), chosen=page("welcomeBox.currentText"), dirty=page("dirty"))),
+        (10, lambda: page("saveButton.clicked()")),
+        (1500, lambda: note(log=log(), dirty_after=page("dirty"))),
     ],
-    # The keyboard's sensor switched off on the presence page.
+    # The barber pole's direction as stored; Explosion, turned inward.
+    "welcome-direction": lambda: [
+        (3500, lambda: note(ways=json.loads(page("JSON.stringify(welcomeWay.model)")), way=page("welcomeWay.currentText"))),
+        (10, lambda: page("welcomeBox.activated(welcomeChoices.findIndex(c => c.id === 'explosion'))")),
+        (10, lambda: page("welcomeWay.activated(1)")),
+        (300, lambda: note(explosion_colors=page("welcomeColors.length"))),
+        (10, lambda: page("save()")),
+        (1500, lambda: note(log=log())),
+    ],
+    # The keyboard's sensor off and its leave action changed: one write on Save.
     "sensor": lambda: [
         (3500, lambda: note(on=page("sensorSwitch.checked"), now=page("sensorSwitch.text"))),
         (10, lambda: page("sensorSwitch.toggle(); sensorSwitch.toggled()")),
+        (10, lambda: page("change('keyboardLeave', 'lock')")),
+        (1000, lambda: note(unsaved=log())),
+        (10, lambda: page("save()")),
         (1500, lambda: note(log=log())),
+    ],
+    # The keyboard's distance, and the service's own (presence.ini) given up for it.
+    "distance": lambda: [
+        (3500, lambda: note(shown=page("distanceBox.value"), own=page("ownDistance.visible"), band=page("withinMm"))),
+        (10, lambda: page("distanceBox.value = 45; distanceBox.valueModified()")),
+        (10, lambda: page("ownDistance.actions[0].trigger()")),
+        (300, lambda: note(band_after=page("withinMm"))),
+        (10, lambda: page("save()")),
+        (1500, lambda: note(log=log())),
+    ],
+    # A change not saved: another page asks first; Discard drops it.
+    "discard": lambda: [
+        (3500, lambda: page("change('leaveAfter', 45)")),
+        (10, lambda: show("keyboard")),
+        (700, lambda: note(asked=win("discardDialog.opened"), still=win("current"))),
+        (10, lambda: win("discardDialog.customFooterActions[0].trigger()")),
+        (1500, lambda: note(after=win("current"), log=log())),
     ],
     "picker": lambda: [
         (3500, lambda: page("keyboard.select(['Q'], true); picker.slot = -1; picker.openAt(keysColor, '')")),

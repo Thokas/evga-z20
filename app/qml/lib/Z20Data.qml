@@ -280,13 +280,10 @@ QtObject {
     }
     // Settings of presence.ini, [key, value, key, value, ...] ("leave", "lock, pause-media", "away light", "").
     function setPresence(changes) { run(["presence", "--json", "--", "set"].concat(changes)); }
-    // What the keyboard itself does when you leave (nothing, dark, lock, sleep), after seconds; active profile.
-    // The keyboard's presence sensor on or off (active profile); off, the presence service can't see you either.
-    function setSensorOn(on) { run(["sensor", on ? "on" : "off"]); }
-    function setSensorLeave(action, seconds) { run(["sensor", "leave", action, seconds]); }
-    // The effect the keyboard itself plays when you come (fade, rows, explosion, raining, barber, lightbar,
-    // thunder), for ms; active profile.
-    function setSensorWelcome(effect, ms) { run(["sensor", "welcome", effect, ms]); }
+    // The keyboard's presence sensor settings in the active profile, several in a row in one write: on | off,
+    // leave nothing|dark|lock|sleep SECONDS, welcome EFFECT MS [COLOR ...] (see z20 sensor). Off, the presence
+    // service can't see you either.
+    function setSensor(words) { run(["sensor"].concat(words)); }
 
     // --- profiles for programs (z20 apps, z20 from 2026-11-16 on) ---------
 

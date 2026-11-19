@@ -21,10 +21,13 @@ def report(*data, size=None):
 
 
 def profile(n=5):
-    """A profile report as the keyboard answers a read, with a byte pattern to spot changes."""
+    """A profile report as the keyboard answers a read, with a byte pattern to spot changes; the effect
+    blocks' zone, start and stop as from the factory (all keys, with the profile, never stopped)."""
     p = report(8, 0xEA, 0x02, z20.READ, n, 0, z20.SUCCESS)
     for i in range(8, len(p)):
         p[i] = i * 7 % 251
+    for _, at, _ in z20.RAM_BLOCKS.values():
+        p[at:at + 3] = b"\x80\x00\x00"
     p[7] = z20.checksum(p)
     return p
 
@@ -128,15 +131,15 @@ class LiveLighting(unittest.TestCase):
             r[7] = z20.checksum(r)
             return r
 
-        for block in range(0x0C, 0x16):
+        for block in range(0x0C, 0x1B):  # the lighting's, the presence sensor's effects' too
             z20.check_request(ram(block, z20.READ))
             z20.check_request(ram(block, z20.WRITE, b"\x05\x02"))
         bad = ram(0x0C, z20.WRITE, b"\x05\x02")
         bad[7] ^= 1
         # 03-0A: the presence sensor (writing it there stops its actions), 0B: key functions,
-        # 00/01: Unleash's sync previews, 02 and 16: unknown
+        # 00/01: Unleash's sync previews, 02 and 1C: unknown
         for r in (bad, ram(0x03, z20.WRITE, b"\x01"), ram(0x08, z20.READ), ram(0x0B, z20.WRITE), ram(0x0B, z20.READ),
-                  ram(0x01, z20.WRITE), ram(0x02, z20.READ), ram(0x16, z20.READ)):
+                  ram(0x01, z20.WRITE), ram(0x02, z20.READ), ram(0x1C, z20.READ)):
             with self.assertRaises(z20.Z20Error):
                 z20.check_request(r)
 
@@ -206,7 +209,18 @@ class Sensor(unittest.TestCase):
     def test_settings_as_profile_1_has_them(self):
         p = profile(1)
         p[152:183] = bytes.fromhex("01b0040000ffff0a000300ff001e00ff001f00ff002000ff0021001600881300"[:62])
-        self.assertEqual(z20.sensor_settings(p), {
+        p[1662:1806] = bytes.fromhex(  # as from the factory
+            "80000000" + "ff" * 12 + "b80b07" + "ffff0000" + "ff000000" * 7 + "80000000" + "ff" * 12 + "d007ff"
+            + "8000000000" + "ff" * 11 + "b80b" + "ffff0000ff0000ffffffffff" + "80000000" + "ff" * 12 + "b80b"
+            + "ffff0000" + "80000000" + "ff" * 12 + "d007" + "ffff0000")
+        s = z20.sensor_settings(p)
+        self.assertEqual(s.pop("welcome_effects"), {
+            "explosion": {"colors": ["#ff0000"] + ["#000000"] * 6, "direction": "out", "brightness": 100},
+            "raining": {"brightness": 100},
+            "barber": {"colors": ["#ff0000", "#0000ff", "#ffffff"], "direction": "left", "brightness": 100},
+            "lightbar": {"colors": ["#ff0000"], "brightness": 100},
+            "thunder": {"colors": ["#ff0000"], "brightness": 100}})
+        self.assertEqual(s, {
             "on": True, "distance_cm": 120.0, "come": "nothing", "come_after_s": 0.0, "leave": "dark",
             "leave_after_s": 10, "welcome": "thunder", "welcome_ms": 5000})
 
@@ -221,9 +235,42 @@ class Sensor(unittest.TestCase):
         self.assertEqual((s["on"], s["distance_cm"], s["leave"], s["leave_after_s"], s["come"], s["come_after_s"],
                           s["welcome"], s["welcome_ms"]), (False, 45.0, "lock", 30, "wake", 2.0, "rows", 3000))
 
+    def test_several_at_once_and_the_welcome_effects_colors(self):
+        p = profile(1)
+        q = z20.set_sensor(p, ["leave", "dark", "30", "welcome", "thunder", "4000", "0000ff", "on"])
+        s = z20.sensor_settings(q)
+        self.assertEqual((s["on"], s["leave"], s["leave_after_s"], s["welcome"], s["welcome_ms"],
+                          s["welcome_effects"]["thunder"]["colors"]), (True, "dark", 30, "thunder", 4000, ["#0000ff"]))
+        self.assertEqual(changed(p, q) - set(range(152, 183)), {1803, 1804, 1805})  # not its brightness
+        q = z20.set_sensor(p, ["welcome", "barber", "#00ff00", "ff00ff"])  # the length as it was
+        self.assertEqual(z20.sensor_settings(q)["welcome_effects"]["barber"]["colors"][:2], ["#00ff00", "#ff00ff"])
+        self.assertEqual(z20.sensor_settings(q)["welcome_ms"], z20.sensor_settings(p)["welcome_ms"])
+
+    def test_the_welcome_effects_direction_and_brightness(self):
+        p = profile(1)
+        q = z20.set_sensor(p, ["welcome", "explosion", "in", "ff8000", "40%"])
+        own = z20.sensor_settings(q)["welcome_effects"]["explosion"]
+        self.assertEqual((own["direction"], own["colors"][0], own["brightness"]), ("in", "#ff8000", 40))
+        self.assertEqual((q[1665], q[180]), (1, 1))  # the direction, also as the welcome's sub mode
+        self.assertEqual({q[1681 + 4 * i] for i in range(7)}, {102})  # every color's brightness, 40 % of 255
+        self.assertEqual(q[1681 + 4 * 7], p[1681 + 4 * 7])  # not the 8th, which Unleash leaves
+        r = z20.set_sensor(q, ["welcome", "thunder", "60%"])
+        self.assertEqual((r[180], r[1802], z20.sensor_settings(r)["welcome_effects"]["thunder"]["brightness"]),
+                         (0, 153, 60))
+        b = z20.set_sensor(p, ["welcome", "barber", "right"])
+        self.assertEqual((b[1736], b[180], z20.sensor_settings(b)["welcome_effects"]["barber"]["direction"]),
+                         (1, 1, "right"))
+        self.assertEqual(z20.set_sensor(p, ["welcome", "raining", "50%"])[1731], 128)
+        self.assertIn("in 40 %", z20.sensor_text(z20.sensor_settings(q)))
+
     def test_out_of_range(self):
         for words in (["distance", "5"], ["distance", "200"], ["leave", "fly"], ["leave", "dark", "5"],
-                      ["come", "wake", "11"], ["welcome", "nosuch"], ["on", "now"], ["distance"]):
+                      ["come", "wake", "11"], ["welcome", "nosuch"], ["on", "now"], ["distance"],
+                      ["welcome", "thunder", "ff0000", "00ff00"], ["welcome", "raining", "ff0000"],
+                      ["welcome", "fade", "ff0000"], ["welcome", "thunder", "4000", "red"],
+                      ["welcome", "thunder", "in"], ["welcome", "explosion", "left"], ["welcome", "fade", "50%"],
+                      ["welcome", "thunder", "120%"], ["welcome", "barber", "left", "right"],
+                      ["leave", "dark", "welcome", "nosuch"]):
             with self.assertRaises(z20.Z20Error, msg=words):
                 z20.set_sensor(profile(1), words)
 
@@ -388,7 +435,7 @@ class PresenceService(unittest.TestCase):
                          ["animate", "fire", "ff0000", "--cycle", "800"])
         self.assertEqual(cfg("away light = light off\n")["away_light"], ["light", "off"])
         for bad in ("fire", "light", "light fire", "animate wave", "light reload", "animate fire --save",
-                    "light static ff0000 --live", "light static 'ff0000"):
+                    "light static ff0000 --live", "light static 'ff0000", "light wave --on-key"):
             with self.assertRaises(z20.Z20Error, msg=bad):
                 cfg(f"away light = {bad}\n")
 
@@ -538,7 +585,7 @@ class GeneralSettings(unittest.TestCase):
         for i in range(8, len(factory)):
             factory[i] = (factory[i] + 1) & 0xFF
         q = z20.from_factory(p, factory, z20.FACTORY_LIGHTING)
-        expected = {*range(1288, 1290), *range(1320, 1597)}
+        expected = {*range(1288, 1290), *range(1320, 1662)}  # every lighting effect, fade and rows too
         self.assertEqual({i for i in range(len(p)) if p[i] != q[i]}, expected)
 
     def test_events(self):
@@ -703,14 +750,64 @@ class Lighting(unittest.TestCase):
         q = z20.set_lighting(p, "static", [b"\x12\x34\x56"], 50, None)
         self.assertEqual(changed(p, q) - {1288, 1289, 1336, 1337, 1338, 1339}, set())
         self.assertEqual((q[1288], bytes(q[1336:1340])), (1, b"\x80\x12\x34\x56"))
-        self.assertEqual(z20.lighting(q), {"effect": "static", "colors": ["#123456"], "brightness": 50})
+        self.assertEqual(z20.lighting(q), {"effect": "static", "colors": ["#123456"], "brightness": 50,
+                                           "zone": ["all"], "on_key": False, "stop": "never"})
+
+    def test_zone_stop_and_reactives_mode_and_fade_out(self):
+        p = profile()
+        q = z20.set_lighting(p, "wave", [], None, None, zone=z20.zone_bits("wasd,arrows"), stop="release")
+        self.assertEqual(changed(p, q) - {1288, 1289}, {z20.P_WAVE, z20.P_WAVE + 2})
+        self.assertEqual((q[z20.P_WAVE], q[z20.P_WAVE + 2]), (0x18, 2))
+        state = z20.lighting(q)
+        self.assertEqual((state["zone"], state["stop"]), (["arrows", "wasd"], "release"))
+        self.assertIn("on arrows, wasd (stops on a key release)", z20.lighting_text(state))
+        self.assertEqual(z20.zone_names(z20.zone_bits("all")), ["all"])
+        for bad in ("", "all,wasd", "keys"):
+            with self.assertRaises(z20.Z20Error, msg=bad):
+                z20.zone_bits(bad)
+        r = z20.set_lighting(p, "reactive", [], None, None, reactive_mode="3x3", fade_out=20)
+        self.assertEqual(changed(p, r) - {1288, 1289}, {1531, 1534, 1535})
+        self.assertEqual((r[1531], r[1289], r[1534] | r[1535] << 8), (2, 2, 62))  # as Unleash stores 20
+        self.assertEqual((z20.lighting(r)["mode"], z20.lighting(r)["fade_out"]), ("3x3", 20))
+
+    def test_the_presence_sensors_effects_as_the_lighting(self):
+        p = profile()
+        q = z20.set_lighting(p, "explosion", [z20.parse_color("ff8000")], 50, None, "in")
+        self.assertEqual((q[1288], q[1289], q[1665], bytes(q[1681:1685])), (18, 1, 1, b"\x80\xff\x80\x00"))
+        state = z20.lighting(q)
+        self.assertEqual((state["effect"], state["direction"], state["colors"][0], state["brightness"], state["zone"]),
+                         ("explosion", "in", "#ff8000", 50, ["all"]))
+        self.assertEqual(len(state["colors"]), 7)
+        r = z20.set_lighting(p, "raining", [], 40, None)
+        self.assertEqual((r[1288], r[1731], z20.lighting(r)["brightness"]), (19, 102, 40))
+        b = z20.set_lighting(p, "barber", [], None, None, "right")
+        self.assertEqual((b[1736], b[1289], z20.lighting(b)["direction"]), (1, 1, "right"))
+        self.assertEqual(z20.lighting(z20.set_lighting(p, "lightbar", [], None, None))["effect"], "lightbar")
+        self.assertEqual(changed(p, z20.set_lighting(p, "thunder", [z20.parse_color("0000ff")], None, None))
+                         - {1288, 1289}, {1803, 1804, 1805})
+
+    def test_fade_out_as_unleash_has_it(self):
+        self.assertEqual([z20.fade_out_raw(s) for s in (0, 20, 50, 51, 100)], [82, 62, 32, 31, 0])
+        self.assertEqual([z20.fade_out_slider(r) for r in (82, 62, 32, 31, 0, 200)], [0, 20, 50, 51, 100, 0])
+
+    def test_on_key_changes_only_the_start_mode(self):
+        p = profile()
+        q = z20.set_lighting(p, "wave", [], None, None, on_key=True)
+        self.assertEqual(changed(p, q) - {1288, 1289}, {z20.P_WAVE + 1})
+        self.assertEqual((q[z20.P_WAVE + 1], z20.lighting(q)["on_key"]), (1, True))
+        self.assertIn("(starts on a key press)", z20.lighting_text(z20.lighting(q)))
+        r = z20.set_lighting(q, "wave", [], None, None, on_key=False)
+        self.assertEqual((r[z20.P_WAVE + 1], z20.lighting(r)["on_key"]), (0, False))
+        self.assertEqual(z20.set_lighting(q, "wave", [], None, None)[z20.P_WAVE + 1], 1)  # not given: as it was
+        self.assertNotIn("on_key", z20.lighting(z20.set_lighting(p, "off", [], None, None)))
 
     def test_breathing_keeps_the_hold_percentages(self):
         p = profile()
         q = z20.set_lighting(p, "breathing", [b"\x00\xff\x00", b"\x00\x00\x00"], None, 4000)
         self.assertEqual(changed(p, q) - {1288, 1289, 1356, 1357, 1360, 1361, 1362, 1365, 1366, 1367}, set())
         self.assertEqual(z20.lighting(q), {"effect": "breathing", "colors": ["#00ff00", "#000000"], "cycle_ms": 4000,
-                                           "brightness": round(p[z20.P_BREATHING + 19] * 100 / 255)})  # as it was
+                                           "brightness": round(p[z20.P_BREATHING + 19] * 100 / 255),  # as it was
+                                           "zone": ["all"], "on_key": False, "stop": "never"})
 
     def test_effects_keep_their_stored_colors(self):
         p = profile()
