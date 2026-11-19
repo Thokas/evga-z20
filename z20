@@ -978,6 +978,8 @@ def watch_sensor(as_json):
 
 
 PRESENCE_CONFIG = os.path.expanduser("~/.config/z20/presence.ini")
+# What the presence service sees, while it runs: {pid, present, since, in_view, sensor, keyboard}.
+PRESENCE_STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or STATE, "z20-presence.json")
 PRESENCE_ACTIONS = ("lock", "screen-off", "wake", "pause-media", "resume-media")
 PRESENCE_DEFAULTS = {"leave after": "30", "come after": "1", "leave": "pause-media", "come": "wake, resume-media",
                      "leave run": "", "come run": "", "distance": "", "away light": ""}
@@ -1207,15 +1209,32 @@ def presence(dry_run):
     def stop(_signum, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop)
-    # lit: the away light shows; viewing: the sensor sees something; settled: from when the distance counts
-    trouble, recent, lit, viewing, settled = None, [], False, True, 0.0
+    # lit: the away light shows; viewing: the sensor sees something; settled: from when the distance counts;
+    # sensor_on: the active profile has the sensor on; since: when present last changed (wall clock)
+    trouble, recent, lit, viewing, settled, sensor_on, since = None, [], False, True, 0.0, True, time.time()
+    published = None
+
+    def publish():
+        """What it sees now, for z20 status (the widget, the app): written when it changes."""
+        nonlocal published
+        state = {"present": tracker.present, "since": since, "in_view": viewing, "sensor": sensor_on,
+                 "keyboard": trouble is None}
+        if state != published:
+            save_json(PRESENCE_STATE, {"pid": os.getpid(), **state})
+            published = state
     try:
         while True:
             try:
                 kb = Keyboard()  # locked only while reading, so other z20 runs go on
                 try:
-                    if cfg["distance_mm"] is None and time.monotonic() - checked > 60:  # follow profile changes
-                        threshold = sensor_settings(kb.read_profile(kb.profile_number()))["distance_cm"] * 10
+                    if time.monotonic() - checked > 10:  # follow profile changes: the sensor on or off, its distance
+                        s = sensor_settings(kb.read_profile(kb.profile_number()))
+                        if s["on"] != sensor_on:
+                            desktop.log("the keyboard's sensor is on" if s["on"] else
+                                        "the keyboard's sensor is off: nothing to go by until it is on again")
+                            sensor_on = s["on"]
+                        if cfg["distance_mm"] is None:
+                            threshold = s["distance_cm"] * 10
                         checked = time.monotonic()
                     d, seen = kb.distance()
                 finally:
@@ -1224,6 +1243,7 @@ def presence(dry_run):
                 if str(e) != trouble:
                     desktop.log(f"waiting for the keyboard: {e}")
                     trouble = str(e)
+                publish()
                 time.sleep(5)
                 continue
             if trouble:
@@ -1249,6 +1269,7 @@ def presence(dry_run):
                 if recent:
                     event = tracker.update(sorted(recent)[len(recent) // 2], now)
             if event:
+                since = time.time()
                 desktop.log(f"{'left' if event == 'leave' else 'back'}: {d} mm "
                             f"(present within {threshold / 10:g} cm)")
                 pending.set(cfg[event], now)  # coming back drops what leaving left pending, and the other way round
@@ -1262,9 +1283,12 @@ def presence(dry_run):
                     desktop.run(cfg[f"{event}_run"])
             for action in pending.due(now):
                 desktop.do(action)
+            publish()
             time.sleep(0.5)
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        if published and os.path.exists(PRESENCE_STATE):
+            os.remove(PRESENCE_STATE)
         if lit:  # stopped (or logged out) while away
             desktop.lighting_back()
 
@@ -2718,7 +2742,7 @@ def status(kb):
             "game_mode": kb.game_mode(), "game_mode_blocks": game_keys(p), "nkro": kb.nkro(),
             "report_rate": rate_hz(p), "lighting": lighting(p), "animation": animation_info(),
             "saved_animation": stored_animation(), "key_colors": stored_key_colors(),
-            "backlight": backlight_info(), "apps": apps_info(),
+            "backlight": backlight_info(), "apps": apps_info(), "presence": presence_info(),
             "keys": keys, "changed_keys": changed, "macros": {str(m): name for m, name in names.items()}}
 
 
@@ -2735,6 +2759,20 @@ def animation_text(state):
     return " ".join([f"z20 animate {state['effect']}", *("#" + c for c in state["colors"]),
                      *([f"{state['cycle_ms']} ms"] if state["cycle_ms"] else []),
                      *([f"{state['brightness']} %"] if state["brightness"] is not None else [])]) + f" ({where})"
+
+
+def presence_info():
+    """What the presence service sees ({present, since (epoch s), in_view, sensor, keyboard}), or None if it
+    doesn't run."""
+    state = process_state(PRESENCE_STATE, "presence")
+    return {k: state[k] for k in ("present", "since", "in_view", "sensor", "keyboard")} if state else None
+
+
+def presence_text(p):
+    at = time.strftime("%H:%M", time.localtime(p["since"]))
+    return ("waiting for the keyboard" if not p["keyboard"] else "the keyboard's sensor is off" if not p["sensor"]
+            else (f"at the desk since {at}" if p["present"] else f"away since {at}")
+            + ("" if p["in_view"] else ", nothing in view now"))
 
 
 def presence_settings():
@@ -3043,6 +3081,8 @@ def main():
                 if s["apps"] and s["apps"]["profile"] == s["profile"]:
                     print(f"profile {s['profile']} for {s['apps']['name']} (z20 apps)" + (
                           f", back to {s['apps']['before']} when it ends" if s["apps"]["before"] != s["profile"] else ""))
+                if s["presence"]:
+                    print(f"presence: {presence_text(s['presence'])} (z20 presence)")
                 for label, key in s["keys"].items():
                     print(f"{label:7} {key['text']}")
                 if s["changed_keys"]:

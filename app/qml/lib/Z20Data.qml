@@ -4,7 +4,8 @@
  * z20-settings app (app/qml) and the Plasma widget, whose install copies it
  * from z20's (~/.local/share/z20/app/qml/lib): changed here only.
  *
- * Reads `z20 status --json`, `z20 sensor --json` and whether the presence
+ * Reads `z20 status --json` (with what the presence service sees, while it
+ * runs), with `readSensor` also `z20 sensor --json`, and whether the presence
  * service runs: every 3 s while `fast`, else every 30 s (`poll`). With
  * `watchSensor`, while `fast`, the sensor alone also every second, for the
  * distance graph. The profile names (`z20 profile --json`) and what the
@@ -47,13 +48,14 @@ QtObject {
 
     property bool fast: false
     property bool poll: true
+    property bool readSensor: false
     property bool watchSensor: false
     property bool watchEvents: false
     property bool showOsd: false
     // The profiles the popup offers (numbers 1-9); the wheel on the panel icon steps through these.
     property var shownProfiles: []
 
-    // z20 status --json and z20 sensor --json, parsed; null until read.
+    // z20 status --json and z20 sensor --json (with readSensor), parsed; null until read.
     property var status: null
     property var sensor: null
     property bool presenceActive: false
@@ -102,6 +104,12 @@ QtObject {
     // Its level in percent of how the lighting is set: as sent, until settled.
     readonly property int backlightPercent: _wanted.backlight !== undefined ? _wanted.backlight
         : backlight ? backlight.percent : 100
+    // What the presence service sees ({present, since (epoch s), in_view, sensor, keyboard}); null while it
+    // doesn't run, and with a z20 from before 2026-11-19.
+    readonly property var presence: status ? status.presence || null : null
+    // When that last changed, as the clock shows it ("" without it).
+    readonly property string presenceSince: presence
+        ? new Date(presence.since * 1000).toLocaleTimeString(Qt.locale(), Locale.ShortFormat) : ""
     // Present: closer than the distance the presence service goes by (its own, or the keyboard's).
     readonly property real presentWithinMm: presenceSettings && presenceSettings.distance_cm
         ? presenceSettings.distance_cm * 10 : sensor ? sensor.distance_cm * 10 : 0
@@ -132,9 +140,9 @@ QtObject {
         if (status.game_mode) {
             lines.push(i18n("Game Mode on"));
         }
-        if (seen !== "") {
-            lines.push(seen === "near" ? i18n("Someone at the desk (%1 cm)", Math.round(sensor.distance_mm / 10))
-                : seen === "far" ? i18n("Nobody at the desk") : i18n("Nothing in the presence sensor's view"));
+        if (presence && presence.keyboard && presence.sensor) {
+            lines.push(presence.present ? i18n("At the desk since %1", presenceSince)
+                                        : i18n("Away since %1", presenceSince));
         }
         return lines.join("\n");
     }
@@ -273,7 +281,12 @@ QtObject {
     // Settings of presence.ini, [key, value, key, value, ...] ("leave", "lock, pause-media", "away light", "").
     function setPresence(changes) { run(["presence", "--json", "--", "set"].concat(changes)); }
     // What the keyboard itself does when you leave (nothing, dark, lock, sleep), after seconds; active profile.
+    // The keyboard's presence sensor on or off (active profile); off, the presence service can't see you either.
+    function setSensorOn(on) { run(["sensor", on ? "on" : "off"]); }
     function setSensorLeave(action, seconds) { run(["sensor", "leave", action, seconds]); }
+    // The effect the keyboard itself plays when you come (fade, rows, explosion, raining, barber, lightbar,
+    // thunder), for ms; active profile.
+    function setSensorWelcome(effect, ms) { run(["sensor", "welcome", effect, ms]); }
 
     // --- profiles for programs (z20 apps, z20 from 2026-11-16 on) ---------
 
@@ -361,7 +374,8 @@ QtObject {
 
     readonly property string _z20: '"$HOME/.local/bin/z20"'
     // One line each: z20's JSON, or an empty line where it failed (its error goes to stderr).
-    readonly property string _readCommand: _z20 + " status --json || echo; " + _z20 + " sensor --json || echo; "
+    readonly property string _readCommand: _z20 + " status --json || echo; "
+        + (readSensor ? _z20 + " sensor --json || echo; " : "echo; ")
         + "systemctl --user is-active z20-presence.service"
     readonly property string _detailCommand: _z20 + " profile --json || echo; " + _z20
         + " presence settings --json || echo; cat \"$HOME/.config/z20/presets.json\" 2>/dev/null | tr -d '\\n'; echo; "

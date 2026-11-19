@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import os
 import sys
+import time
 import unittest
 
 sys.dont_write_bytecode = True
@@ -277,12 +278,13 @@ class PresenceService(unittest.TestCase):
                                    ("00000000", False, "nothing"), ("00000010", False, "near")):
             self.assertEqual((z20.in_view(verdicts(text)), z20.newest_echo(verdicts(text))), (view, newest), text)
 
-    def test_nothing_in_view_holds_present_or_away(self):
-        near, far = (380, ["near"] * 8), (700, ["far"] * 8)
-        nothing = (45, ["nothing"] * 8)  # the distance then drifts to a few cm and means nothing
-        # s: sitting 10, leaning back out of view 60 (no leave), gone 35 (leave after 30), the sensor
-        # losing the chair 10 (no come: 45 mm would have been "near"), back 5 (come after 1)
-        readings = iter([near] * 20 + [nothing] * 120 + [far] * 70 + [nothing] * 20 + [near] * 10)
+    def watch(self, readings, sensor_on=None):
+        """Runs the presence service (dry run, time patched: 0.5 s a reading) over readings, (mm, verdicts)
+        each; the profile's sensor is on, or as sensor_on(time) says. Returns the actions it took
+        [(time, action)] and what it published [(time, state without pid)], and whether its state
+        file was gone at the end."""
+        import tempfile
+        readings = iter(readings)
         clock = [0.0]
 
         class Keyboard:
@@ -302,21 +304,63 @@ class PresenceService(unittest.TestCase):
                 pass
         cfg = z20.presence_config("presence.ini", "[presence]\nleave = lock\ncome = wake\n")
         saved = (z20.Keyboard, z20.presence_config, z20.sensor_settings, z20.time.monotonic, z20.time.sleep,
-                 z20.Desktop.do, z20.Desktop.log)
-        done = []
-        try:
-            z20.Keyboard, z20.presence_config = Keyboard, lambda: cfg
-            z20.sensor_settings = lambda p: {"distance_cm": 50.0}
-            z20.time.monotonic = lambda: clock[0]
-            z20.time.sleep = lambda s: clock.__setitem__(0, clock[0] + s)
-            z20.Desktop.do = lambda self, action: done.append((clock[0], action))
-            z20.Desktop.log = lambda self, text: None
-            with self.assertRaises(KeyboardInterrupt):
-                z20.presence(dry_run=True)
-        finally:
-            (z20.Keyboard, z20.presence_config, z20.sensor_settings, z20.time.monotonic, z20.time.sleep,
-             z20.Desktop.do, z20.Desktop.log) = saved
+                 z20.Desktop.do, z20.Desktop.log, z20.PRESENCE_STATE, z20.save_json)
+        done, published = [], []
+        save_json = z20.save_json
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                z20.Keyboard, z20.presence_config = Keyboard, lambda: cfg
+                z20.sensor_settings = lambda p: {"on": sensor_on(clock[0]) if sensor_on else True,
+                                                 "distance_cm": 50.0}
+                z20.time.monotonic = lambda: clock[0]
+                z20.time.sleep = lambda s: clock.__setitem__(0, clock[0] + s)
+                z20.Desktop.do = lambda self, action: done.append((clock[0], action))
+                z20.Desktop.log = lambda self, text: None
+                z20.PRESENCE_STATE = os.path.join(d, "z20-presence.json")
+
+                def save(path, data):
+                    published.append((clock[0], {k: v for k, v in data.items() if k != "pid"}))
+                    save_json(path, data)
+                z20.save_json = save
+                with self.assertRaises(KeyboardInterrupt):
+                    z20.presence(dry_run=True)
+                gone = not os.path.exists(z20.PRESENCE_STATE)
+            finally:
+                (z20.Keyboard, z20.presence_config, z20.sensor_settings, z20.time.monotonic, z20.time.sleep,
+                 z20.Desktop.do, z20.Desktop.log, z20.PRESENCE_STATE, z20.save_json) = saved
+        return done, published, gone
+
+    def test_nothing_in_view_holds_present_or_away(self):
+        near, far = (380, ["near"] * 8), (700, ["far"] * 8)
+        nothing = (45, ["nothing"] * 8)  # the distance then drifts to a few cm and means nothing
+        # s: sitting 10, leaning back out of view 60 (no leave), gone 35 (leave after 30), the sensor
+        # losing the chair 10 (no come: 45 mm would have been "near"), back 5 (come after 1)
+        done, _, _ = self.watch([near] * 20 + [nothing] * 120 + [far] * 70 + [nothing] * 20 + [near] * 10)
         self.assertEqual(done, [(100.0, "lock"), (116.0, "wake")])
+
+    def test_it_publishes_what_it_sees(self):
+        near, far, nothing = (380, ["near"] * 8), (700, ["far"] * 8), (45, ["nothing"] * 8)
+        # s: sitting 10, out of view 10, gone 35 (leave after 30), back 5; then the sensor off from 70 s on
+        _, published, gone = self.watch([near] * 20 + [nothing] * 20 + [far] * 70 + [near] * 10 + [nothing] * 30,
+                                        sensor_on=lambda t: t < 70)
+        seen = [(t, p["present"], p["in_view"], p["sensor"]) for t, p in published]
+        # left 30 s after the first far reading, back 1 s after most of the last 5 were near, the sensor off
+        # at the next look at the profile (every 10 s)
+        self.assertEqual(seen, [(0.0, True, True, True), (10.0, True, False, True), (20.0, True, True, True),
+                                (50.0, False, True, True), (57.0, True, True, True), (60.0, True, False, True),
+                                (73.5, True, False, False)])
+        self.assertTrue(all(p["keyboard"] for _, p in published))
+        self.assertNotEqual(published[3][1]["since"], published[2][1]["since"])  # when it changed
+        self.assertTrue(gone)  # with the service
+
+    def test_what_status_says_of_it(self):
+        at = time.mktime((2026, 11, 19, 10, 31, 0, 0, 0, -1))
+        p = {"present": True, "since": at, "in_view": True, "sensor": True, "keyboard": True}
+        self.assertEqual(z20.presence_text(p), "at the desk since 10:31")
+        self.assertEqual(z20.presence_text({**p, "present": False, "in_view": False}),
+                         "away since 10:31, nothing in view now")
+        self.assertEqual(z20.presence_text({**p, "sensor": False}), "the keyboard's sensor is off")
+        self.assertEqual(z20.presence_text({**p, "keyboard": False}), "waiting for the keyboard")
 
     def test_config(self):
         import tempfile

@@ -116,6 +116,19 @@ SCENARIOS = {
                             keys=next((p.get("keys") for p in presets() or [] if p["name"] == "Rainbow"), None),
                             log=log())),
     ],
+    # The keyboard's own settings on the presence page: as read, then a welcome effect and its length set.
+    "welcome": lambda: [
+        (3500, lambda: note(shown=page("welcomeBox.currentText"), length=page("welcomeLengthBox.value"))),
+        (10, lambda: page("welcomeBox.activated(welcomeChoices.findIndex(c => c.id === 'barber'))")),
+        (10, lambda: page("welcomeLengthBox.value = 3000; welcomeLengthBox.valueModified()")),
+        (2000, lambda: note(log=log(), chosen=page("welcomeBox.currentText"))),
+    ],
+    # The keyboard's sensor switched off on the presence page.
+    "sensor": lambda: [
+        (3500, lambda: note(on=page("sensorSwitch.checked"), now=page("sensorSwitch.text"))),
+        (10, lambda: page("sensorSwitch.toggle(); sensorSwitch.toggled()")),
+        (1500, lambda: note(log=log())),
+    ],
     "picker": lambda: [
         (3500, lambda: page("keyboard.select(['Q'], true); picker.slot = -1; picker.openAt(keysColor, '')")),
         (700, lambda: note(opened=page("picker.opened"),

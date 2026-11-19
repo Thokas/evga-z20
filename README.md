@@ -359,6 +359,12 @@ way round. Without a config file: leave =
 second and decides on the median of the last five readings (single ones
 jump by a few centimetres), keeps waiting while the keyboard is unplugged
 or the computer sleeps, and lets other `z20` commands run in between.
+While it runs, `z20 status` says what it sees (`presence` in `--json`: at
+the desk or away and since when, nothing in view, the keyboard's sensor
+off), which the Plasma widget shows. It looks at the active profile every
+10 s: with the keyboard's sensor off (`z20 sensor off`, or the switch on
+the settings app's Presence page), the keyboard reports no echo at all, and
+the service can't see you either.
 
 The sensor sees the nearest thing in front of it: a chair left near the
 distance you set looks like someone leaning back. Push the chair back or
@@ -440,18 +446,20 @@ does.
 lighting presets on a drawing of the keyboard that runs them, colors of
 single keys over the effect, a color picker with the desktop's colors),
 **Macros**, **Profiles** (their names), **Programs** (profiles for
-programs), **Presence** (what the presence service does, and what the
-keyboard itself does when you leave) and **Keyboard** (report rate,
-rollover, the keys Game Mode blocks). It is in the application menu as
-"EVGA Z20"; `z20-settings macros` opens it on a page, and run again while
-it is open, the open one shows that page (as the Plasma widget's pencils
-do). It changes the keyboard through `z20`, at once; the presets are kept
-in `~/.config/z20/presets.json`, which the widget's popup offers too. On
-the first start the lighting the keyboard has stored is the first preset
-(a built-in one where it is that, else one named after the profile), and
+programs), **Presence** (the keyboard's presence sensor on or off with what
+it sees now and the distance over the last two minutes, what the presence
+service does on the computer, and what the keyboard itself does when you
+leave and its welcome effect when you come) and **Keyboard** (report rate,
+rollover, the keys Game Mode blocks). It is in the application menu as "EVGA
+Z20"; `z20-settings macros` opens it on a page, and run again while it is
+open, the open one shows that page (as the Plasma widget's pencils do). It
+changes the keyboard through `z20`, at once; the presets are kept in
+`~/.config/z20/presets.json`, which the widget's popup offers too. On the
+first start the lighting the keyboard has stored is the first preset (a
+built-in one where it is that, else one named after the profile), and
 whichever preset is what the keyboard has stored, however it got there, is
-marked as applied, in the app and in the popup (`z20 status --json` has
-the stored lighting with all its colors and direction, the software effect
+marked as applied, in the app and in the popup (`z20 status --json` has the
+stored lighting with all its colors and direction, the software effect
 stored, `saved_animation`, and the keys' stored colors, `key_colors`).
 
 It is QML with KDE's Kirigami, run by a small Python launcher; it needs

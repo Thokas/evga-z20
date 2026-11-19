@@ -48,11 +48,16 @@ OWN_WAVE = {"effect": "wave", "colors": ["#ff0000", "#d80c36", "#000000", "#ff00
 RAINBOW = {"effect": "wave", "colors": ["#ff0000", "#ff8000", "#ffff00", "#00ff00", "#00ffff", "#0000ff",
                                         "#ff00ff", "#ff0000"], "direction": "right", "cycle_ms": 3000, "brightness": 100}
 
+# z20 sensor --json as the keyboard answers it (its welcome effect named as z20 reads it).
+SENSOR = {"profile": 1, "on": True, "distance_cm": 50.0, "come": "nothing", "come_after_s": 1.0, "leave": "dark",
+          "leave_after_s": 10, "welcome": "barber pole", "welcome_ms": 5000, "distance_mm": 503,
+          "seen": ["near"] * 8, "in_view": True}
+
 
 @unittest.skipIf(MISSING, f"the app's tests need {MISSING}")
 class App(unittest.TestCase):
 
-    def drive(self, scenario, lighting=OWN_WAVE, page="lighting"):
+    def drive(self, scenario, lighting=OWN_WAVE, page="lighting", sensor=None):
         home, runtime = tempfile.mkdtemp(prefix="z20home"), tempfile.mkdtemp(prefix="z20rt")
         self.addCleanup(shutil.rmtree, home)
         self.addCleanup(shutil.rmtree, runtime)
@@ -60,6 +65,9 @@ class App(unittest.TestCase):
         shutil.copy(os.path.join(HERE, "app", "fake_z20"), os.path.join(home, ".local", "bin", "z20"))
         with open(os.path.join(home, "status.json"), "w") as f:
             json.dump({**STATUS, "lighting": lighting}, f)
+        if sensor:
+            with open(os.path.join(home, "sensor.json"), "w") as f:
+                json.dump(sensor, f)
         # Nothing of the session: no display, no session bus (D-Bus would start the desktop's services for
         # this home), no XDG dirs.
         env = {k: v for k, v in os.environ.items() if not k.startswith(("QT_", "XDG_", "DBUS_"))
@@ -108,6 +116,18 @@ class App(unittest.TestCase):
         self.assertEqual(r["selected"], 2)
         self.assertEqual(r["keys"], {"W": "ff0000", "A": "ff0000"})
         self.assertIn("color all none W,A ff0000 --live", r["log"])
+
+    def test_the_keyboards_welcome_effect_is_shown_and_set(self):
+        r, _ = self.drive("welcome", page="presence", sensor=SENSOR)
+        self.assertEqual((r["shown"], r["length"]), ("Barber pole", 5000))  # as z20 sensor --json names it
+        self.assertEqual(r["chosen"], "Barber pole")
+        self.assertIn("sensor welcome barber 5000", r["log"])
+        self.assertIn("sensor welcome barber 3000", r["log"])  # the length, once it stood still
+
+    def test_the_keyboards_sensor_can_be_switched_off(self):
+        r, _ = self.drive("sensor", page="presence", sensor=SENSOR)
+        self.assertEqual((r["on"], r["now"]), (True, "On"))
+        self.assertIn("sensor off", r["log"])
 
     def test_the_picker_offers_the_desktops_colors(self):
         r, _ = self.drive("picker")

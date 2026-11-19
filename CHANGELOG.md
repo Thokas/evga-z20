@@ -6,6 +6,24 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The settings app's Presence page switches the keyboard's presence sensor
+  on and off, shows what it sees and the distance over the last two
+  minutes (before in the Plasma widget), and sets the keyboard's welcome
+  effect and its length. It is in parts: the sensor, what z20's presence
+  service does on the computer, and what the keyboard itself does.
+- The presence service says what it sees (at the desk or away, since
+  when, nothing in view, the keyboard's sensor off) in
+  `$XDG_RUNTIME_DIR/z20-presence.json`, and `z20 status` passes it on
+  (`presence`), for the Plasma widget.
+
+### Changed
+
+- The presence service looks at the active profile every 10 s (was 60 s,
+  and only without a `distance` of its own), and logs when the keyboard's
+  sensor goes off or on.
+
 ## [0.1.0] - 2026-11-17
 
 The first release. Tested on a Z20 Elite ISO with firmware 1.38; the Z20
